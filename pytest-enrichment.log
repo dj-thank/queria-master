@@ -1,0 +1,15 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0 -- C:\Users\rambo\Documents\Codex\2026-08-19\plugin-browser-openai-bundled-mention-tab-2\work\queria-master\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\rambo\Documents\Codex\2026-08-19\plugin-browser-openai-bundled-mention-tab-2\work\queria-master
+configfile: pyproject.toml
+collecting ... collected 4 items
+
+tests/test_enrichment.py::test_companion_layer_is_resumable_and_does_not_change_canonical PASSED
+tests/test_enrichment.py::test_companion_writer_lock_is_exclusive PASSED
+tests/test_enrichment.py::test_worker_marks_missing_url_without_guessing 
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! KeyboardInterrupt !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+C:\Users\rambo\Documents\Codex\2026-08-19\plugin-browser-openai-bundled-mention-tab-2\work\queria-master\tests\test_enrichment.py:21: KeyboardInterrupt
+(to show a full traceback on KeyboardInterrupt use --full-trace)
+============================== 2 passed in 1.59s ==============================

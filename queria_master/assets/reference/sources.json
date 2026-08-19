@@ -1,0 +1,113 @@
+{
+  "generated_at": "2026-08-18",
+  "sources": [
+    {
+      "source_name": "Queria gBizINFO 法人活動情報",
+      "queria_dataset": "gbizinfo",
+      "table_name": "gbizinfo.main.mart_gbizinfo_company",
+      "role": "法人サマリー・業種・資本金・従業員・代表者・事業概要・URL・最新財務指標・最新職場指標・活動集計",
+      "source_url": "https://queria.io/datasets/queria/gbizinfo",
+      "license_name": "政府標準利用規約（第2.0版）",
+      "attribution": "出典：gBizINFO（経済産業省）"
+    },
+    {
+      "source_name": "Queria gBizINFO 補助金",
+      "queria_dataset": "gbizinfo",
+      "table_name": "gbizinfo.main.mart_gbizinfo_subsidy",
+      "role": "補助金の明細（1行1案件）",
+      "source_url": "https://queria.io/datasets/queria/gbizinfo",
+      "license_name": "政府標準利用規約（第2.0版）",
+      "attribution": "出典：gBizINFO（経済産業省）"
+    },
+    {
+      "source_name": "Queria gBizINFO 調達",
+      "queria_dataset": "gbizinfo",
+      "table_name": "gbizinfo.main.mart_gbizinfo_procurement",
+      "role": "調達・落札の明細（1行1案件）",
+      "source_url": "https://queria.io/datasets/queria/gbizinfo",
+      "license_name": "政府標準利用規約（第2.0版）",
+      "attribution": "出典：gBizINFO（経済産業省）"
+    },
+    {
+      "source_name": "Queria gBizINFO 特許等",
+      "queria_dataset": "gbizinfo",
+      "table_name": "gbizinfo.main.mart_gbizinfo_patent",
+      "role": "特許・意匠・商標の権利明細（1行1権利）",
+      "source_url": "https://queria.io/datasets/queria/gbizinfo",
+      "license_name": "政府標準利用規約（第2.0版）",
+      "attribution": "出典：gBizINFO（経済産業省）"
+    },
+    {
+      "source_name": "Queria gBizINFO 届出・認定",
+      "queria_dataset": "gbizinfo",
+      "table_name": "gbizinfo.main.mart_gbizinfo_certification",
+      "role": "届出・認定の明細（1行1認定）",
+      "source_url": "https://queria.io/datasets/queria/gbizinfo",
+      "license_name": "政府標準利用規約（第2.0版）",
+      "attribution": "出典：gBizINFO（経済産業省）"
+    },
+    {
+      "source_name": "Queria gBizINFO 表彰",
+      "queria_dataset": "gbizinfo",
+      "table_name": "gbizinfo.main.mart_gbizinfo_commendation",
+      "role": "表彰の明細（1行1表彰）",
+      "source_url": "https://queria.io/datasets/queria/gbizinfo",
+      "license_name": "政府標準利用規約（第2.0版）",
+      "attribution": "出典：gBizINFO（経済産業省）"
+    },
+    {
+      "source_name": "Queria 国税庁法人番号",
+      "queria_dataset": "houjin_bangou",
+      "table_name": "houjin_bangou.main.mart_houjin_bangou",
+      "role": "法人番号・商号・所在地・法人種別",
+      "source_url": "https://queria.io/datasets/queria/houjin_bangou",
+      "license_name": "公共データ利用規約（第1.0版、CC BY 4.0互換）",
+      "attribution": "出典：国税庁法人番号公表サイト（国税庁）"
+    },
+    {
+      "source_name": "日本標準産業分類（令和5年改定）",
+      "queria_dataset": null,
+      "table_name": "meta.jsic_info_communications",
+      "role": "G・37〜41 の分類マスタ",
+      "source_url": "https://www.soumu.go.jp/toukei_toukatsu/index/seido/sangyo/R05index.htm",
+      "license_name": "政府公開資料",
+      "attribution": "出典：総務省 日本標準産業分類"
+    },
+    {
+      "source_name": "Queria EDINET 公開テーブル",
+      "queria_dataset": "edinet",
+      "table_name": "edinet.main.mart_companies / mart_documents / mart_business_results / stg_financial_facts / mart_funds",
+      "role": "提出会社・提出書類・主要財務指標・財務ファクト・ファンド",
+      "source_url": "https://disclosure2dl.edinet-fsa.go.jp/guide/static/disclosure/download/ESE140206.pdf",
+      "license_name": "EDINET公開情報（利用条件確認要）",
+      "attribution": "出典：EDINET（金融庁）"
+    },
+    {
+      "source_name": "Queria 厚生労働省公開テーブル",
+      "queria_dataset": "mhlw",
+      "table_name": "mhlw.josei_katsuyaku.company / kaigo.establishment / shougai.establishment / ndb.health_checkup",
+      "role": "女性活躍・介護・障害福祉・NDB特定健診統計",
+      "source_url": "https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/0000177182.html",
+      "license_name": "政府標準利用規約・各データの利用条件確認要",
+      "attribution": "出典：厚生労働省"
+    },
+    {
+      "source_name": "Queria 政府電子調達落札実績",
+      "queria_dataset": "p_portal",
+      "table_name": "p_portal.main.procurement_award",
+      "role": "政府電子調達システムの落札実績",
+      "source_url": "https://www.p-portal.go.jp/pps-web-biz/UAB02/OAB0201",
+      "license_name": "政府公開情報（利用条件確認要）",
+      "attribution": "出典：調達ポータル"
+    },
+    {
+      "source_name": "Queria 東京都オープンデータ選定テーブル",
+      "queria_dataset": "metro_tokyo",
+      "table_name": "metro_tokyo.ods.care_service / cultural_property / event / food_business / public_facility / support_system / tourism",
+      "role": "介護・文化財・イベント・食品営業・公共施設・支援制度・観光",
+      "source_url": "https://www.digital.go.jp/resources/open_data/municipal-standard-data-set-test",
+      "license_name": "自治体標準オープンデータセット・各データの利用条件確認要",
+      "attribution": "出典：東京都オープンデータ"
+    }
+  ]
+}

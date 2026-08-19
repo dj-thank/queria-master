@@ -1,0 +1,11 @@
+{
+  "project": "C:\\Users\\rambo\\Documents\\Codex\\2026-08-19\\plugin-browser-openai-bundled-mention-tab-2\\work\\queria-master",
+  "pid": 5556,
+  "startedAt": "2026-08-19T05:20:59.2875902+00:00",
+  "finishedAt": "2026-08-19T05:21:01.1726413+00:00",
+  "elapsedSeconds": 1.885,
+  "timedOut": false,
+  "exitCode": 2,
+  "stdout": "C:\\Users\\rambo\\Documents\\Codex\\2026-08-19\\plugin-browser-openai-bundled-mention-tab-2\\work\\queria-master\\pytest-enrichment.log",
+  "stderr": "C:\\Users\\rambo\\Documents\\Codex\\2026-08-19\\plugin-browser-openai-bundled-mention-tab-2\\work\\queria-master\\pytest-enrichment.stderr.log"
+}

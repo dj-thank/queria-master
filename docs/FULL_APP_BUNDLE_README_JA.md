@@ -1,0 +1,43 @@
+# Queria 0.8.0 全量DB同梱アプリ版
+
+この配布物は、検索アプリと全量データを同じフォルダへ展開して使う完全版です。`data` フォルダには統合ランタイムDB、高速検索索引、更新元DB、証拠付き拡張DBを収録しています。
+
+## GUI
+
+通常は次を起動します。
+
+```powershell
+.\queria-master-desktop\queria-master-desktop.exe
+```
+
+Windowsのアプリケーション制御でwindowed版が拒否される場合は、コンソール互換版を使います。
+
+```powershell
+.\queria-master-desktop-console\queria-master-desktop.exe
+```
+
+## CLI常駐検索
+
+```powershell
+.\queria-master-cli\queria-master.exe `
+  --db .\data\queria_runtime.duckdb `
+  daemon --search-index .\data\search.sqlite
+```
+
+JSONLで検索要求を送ります。
+
+```json
+{"op":"search","keyword":"ソフトウェア","prefecture":"東京都","limit":1000}
+```
+
+## 収録データ
+
+- `data\queria_runtime.duckdb`: アプリが参照する統合ランタイムDB
+- `data\search.sqlite`: SQLite FTS5 trigram・カテゴリ高速索引
+- `data\queria_master.duckdb`: 更新元の法人マスタ
+- `data\queria_enrichment.duckdb`: 証拠付き拡張層
+- `data\source_metadata.json`: 取得元・更新メタデータ
+
+DBはアプリへ埋め込まず、展開後のファイルとして読み取り専用で使います。これにより検索時の無駄な展開を避け、DB更新時もアプリ本体を作り直さずに済みます。
+
+全量5,823,039法人の高速検索を対象にしています。検索処理、GUI描画、CSV書き込み、初回EXE起動は別の時間として扱います。

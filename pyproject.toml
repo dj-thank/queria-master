@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "queria-master"
+version = "0.8.0"
+description = "Load Queria public corporate and adjacent data into a local DuckDB master"
+requires-python = ">=3.10"
+dependencies = [
+  "duckdb>=1.5.5,<2",
+  "queria>=0.21.0,<1",
+]
+
+[project.optional-dependencies]
+semantic = [
+  "numpy>=1.26,<3",
+  "sentence-transformers>=3,<6",
+]
+
+[project.scripts]
+queria-master = "queria_master.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["queria_master*"]
+
+[tool.setuptools.package-data]
+queria_master = [
+  "assets/sql/remote/*.sql",
+  "assets/reference/*.json",
+  "assets/reference/*.csv",
+]

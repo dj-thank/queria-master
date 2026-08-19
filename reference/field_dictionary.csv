@@ -1,0 +1,24 @@
+field_name,japanese_name,primary_source,notes
+corporate_number,法人番号,国税庁法人番号,13桁文字列
+company_name,商号または名称,国税庁法人番号,gBizINFO名は補助値
+company_name_en,商号または名称（英字）,国税庁法人番号,
+company_name_kana,フリガナ,国税庁法人番号,
+corporate_kind_code,法人種別コード,国税庁法人番号,301=株式会社など
+post_code,郵便番号,国税庁法人番号,7桁
+prefecture_name,都道府県,国税庁法人番号,
+city_name,市区町村,国税庁法人番号,
+full_address,所在地,国税庁法人番号,都道府県・市区町村・丁目番地等の連結
+representative_name,代表者名称,gBizINFO,
+capital_stock,資本金,gBizINFO,円
+employee_number,従業員数,gBizINFO,
+business_summary,事業概要,gBizINFO,
+jsic_codes_raw,正規化業種コード,ローカル処理,G / G37〜G41 をパイプ区切りで保持
+jsic_codes_all_raw,全業種正規化コード,ローカル処理,大分類・中分類・小分類をパイプ区切りで保持
+jsic_major_codes_all,全業種大分類コード,ローカル処理,複数業種はパイプ区切り
+jsic_middle_codes_all,全業種中分類コード,ローカル処理,複数業種はパイプ区切り
+business_items_raw,gBizINFO事業種目原文,gBizINFO,G:情報通信業-40:... の形式
+company_url,WebサイトURL,gBizINFO,
+subsidy_count,補助金交付件数,gBizINFO集計,
+procurement_count,調達受注件数,gBizINFO集計,
+latest_net_sales,最新売上高,gBizINFO財務,円
+extracted_at,抽出日時,ローカル処理,UTCを含むTIMESTAMPTZ

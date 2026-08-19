@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+data/*.duckdb
+data/*.duckdb.*
+data/source_metadata.json
+cache/*.parquet
+cache/run-*/
+exports/*
+!exports/.gitkeep
+!exports/README.md
+.env

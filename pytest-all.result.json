@@ -1,0 +1,11 @@
+{
+  "pid": 7776,
+  "project": "C:\\Users\\rambo\\Documents\\Codex\\2026-08-19\\plugin-browser-openai-bundled-mention-tab-2\\work\\queria-master",
+  "started_at": "2026-08-19T05:24:29.469927+00:00",
+  "stdout": "C:\\Users\\rambo\\Documents\\Codex\\2026-08-19\\plugin-browser-openai-bundled-mention-tab-2\\work\\queria-master\\pytest-detached.stdout.log",
+  "stderr": "C:\\Users\\rambo\\Documents\\Codex\\2026-08-19\\plugin-browser-openai-bundled-mention-tab-2\\work\\queria-master\\pytest-detached.stderr.log",
+  "launcher_pid": 28464,
+  "finished_at": "2026-08-19T05:24:33.104904+00:00",
+  "exit_code": 0,
+  "timed_out": false
+}
