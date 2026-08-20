@@ -13,6 +13,8 @@ Queria が公開する **国税庁法人番号・gBizINFO・EDINET・厚生労�
 
 ## 最初に実行するもの
 
+CompanyMaster Windowsアプリの統合ソースと、既存の全量 Queria runtime DB への接続仕様は [`docs/COMPANYMASTER_INTEGRATION_JA.md`](docs/COMPANYMASTER_INTEGRATION_JA.md) を参照してください。
+
 ### Windows
 
 ZIP を展開し、`01_初回セットアップ.bat` をダブルクリックします。

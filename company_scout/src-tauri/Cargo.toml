@@ -1,0 +1,32 @@
+[package]
+name = "company-master"
+version = "0.2.0"
+description = "Fast internal company search, research, and Salesforce export"
+authors = ["GL Workspace"]
+edition = "2021"
+
+[lib]
+name = "company_master_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt-multi-thread", "macros", "net"] }
+duckdb = { version = "1.10505.0", features = ["bundled", "parquet", "json"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "form", "rustls-tls"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+url = "2"
+keyring = "3"
+which = "7"
+anyhow = "1"
+csv = "1"
