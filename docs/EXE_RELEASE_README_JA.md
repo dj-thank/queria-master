@@ -27,7 +27,7 @@ $env:QUERIA_MASTER_HOME = 'D:\Queria\release-root'
 
 ## 起動
 
-`queria-master-desktop.exe` を起動し、キーワード、都道府県、市区町村、JSIC中分類、URL有無、件数を入力します。件数の上限は画面では1,000件です。Enterで検索し、結果をダブルクリックするとURLを開きます。表示中の結果はCSVへ書き出せます。
+`queria-master-desktop.exe` をダブルクリックして起動し、キーワード、都道府県、市区町村、JSIC中分類、URL有無、件数を入力します。DesktopビルドにはTcl/Tk互換フックを含めているため、Windows環境でも同梱ランタイムを自動検出します。件数の上限は画面では1,000件です。Enterで検索し、結果をダブルクリックするとURLを開きます。表示中の結果はCSVへ書き出せます。
 
 ## 実測値
 
