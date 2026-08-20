@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Bot,
   Building2,
@@ -381,7 +381,7 @@ function App() {
             <div className="content-grid">
               <div className="table-card">
                 <table>
-                  <thead><tr><th>会社</th><th>所在地</th><th>業種</th><th>従業員</th><th>資本金</th><th>Web</th></tr></thead>
+                  <thead><tr><th>会社</th><th>所在地</th><th>業種</th><th>従業員</th><th>資本金</th><th>電話</th><th>Web</th></tr></thead>
                   <tbody>
                     {result?.rows.map((company) => (
                       <tr key={company.corporate_number} className={selected?.corporate_number === company.corporate_number ? "selected" : ""} onClick={() => setSelected(company)}>
@@ -390,10 +390,11 @@ function App() {
                         <td><span>{company.industry_name || company.inferred_industry_name || "-"}</span>{company.inferred_industry_name && !company.industry_name && <small className="inferred">AI推定</small>}</td>
                         <td>{company.employees != null ? fmt.format(company.employees) : "-"}</td>
                         <td>{compactNumber(company.capital)}</td>
+                        <td>{company.phone || "-"}</td>
                         <td>{company.website ? <a href={company.website} onClick={(e) => { e.stopPropagation(); void openUrl(company.website!); }}><ExternalLink size={15} /></a> : "-"}</td>
                       </tr>
                     ))}
-                    {!result?.rows.length && <tr><td colSpan={6} className="empty">自然文で条件を書き、Lunaに相談すると検索条件を作って抽出します。</td></tr>}
+                    {!result?.rows.length && <tr><td colSpan={7} className="empty">自然文で条件を書き、Lunaに相談すると検索条件を作って抽出します。</td></tr>}
                   </tbody>
                 </table>
                 {result && result.total > result.page_size && (
@@ -415,6 +416,7 @@ function App() {
                     <div><dt>従業員</dt><dd>{selected.employees != null ? `${fmt.format(selected.employees)}名` : "-"}</dd></div>
                     <div><dt>資本金</dt><dd>{selected.capital != null ? `${fmt.format(selected.capital)}円` : "-"}</dd></div>
                     <div><dt>設立年</dt><dd>{selected.established_year ?? "-"}</dd></div>
+                    <div><dt>電話</dt><dd>{selected.phone || "-"}</dd></div>
                   </dl>
                   {selected.business_summary && <p className="summary">{selected.business_summary}</p>}
                   <button className="primary full" onClick={deepResearch} disabled={busy === "research" || !codex?.authenticated || !codex?.luna_available}>
@@ -459,7 +461,7 @@ function App() {
   );
 }
 
-function ConnectionCard({ icon, title, status, ok, description, children }: { icon: React.ReactNode; title: string; status: string; ok: boolean; description: string; children: React.ReactNode }) {
+function ConnectionCard({ icon, title, status, ok, description, children }: { icon: ReactNode; title: string; status: string; ok: boolean; description: string; children: ReactNode }) {
   return <article className="connection-card"><div className="connection-top"><div className="connection-icon">{icon}</div><span className={ok ? "status ok" : "status"}>{ok && <CheckCircle2 size={13}/>} {status}</span></div><h3>{title}</h3><p>{description}</p><div className="connection-actions">{children}</div></article>;
 }
 

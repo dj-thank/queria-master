@@ -12,6 +12,7 @@
 - 検索条件をローカルメモリーに保存し、次回起動後に再利用
 - 企業別の公開 Web 深掘り、根拠 URL、AI 推定業種、調査メモ、根拠トランスクリプトを保存
 - 検索結果全体を名前付きリストにし、CSV 出力
+- 電話番号は `search.company_documents.phone`（公式サイト等の証拠付き拡張層）を法人番号で結合して表示・CSV/Salesforceへ出力
 - Salesforce Account へ法人番号を外部 ID とした Bulk API 2.0 Upsert
 - OpenAI API キーを共有せず、利用者ごとに自分の ChatGPT アカウントで Codex にログイン
 - LLM は `gpt-5.6-luna` にハードロック。モデル選択 UI / 自動フォールバックなし
@@ -55,6 +56,11 @@ CompanyMaster.exe
 
 検索・一覧は外部ランタイムDBを読み取り専用で使い、検索メモリー、企業リスト、調査レポートは
 CompanyMaster専用のローカルDuckDBへ保存します。外部DB更新後はCompanyMasterを再起動してください。
+
+電話番号は国税庁法人番号・gBizINFOの基礎マスター項目ではないため、runtime内の
+`search.company_documents` に証拠付き拡張データがある場合だけ表示します。現在の同梱runtimeでは
+電話番号件数が0件なので、電話を埋めるには既存の公式サイト調査・enrichment処理を実行してruntimeを
+更新してください。電話がない会社を推測で補完することはありません。
 
 ## データの考え方
 

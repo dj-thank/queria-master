@@ -11,6 +11,7 @@
 - 自然文の条件解釈とWeb調査は、ユーザー本人のChatGPTログインを使う Codex App Server 経由
 - `gpt-5.6-luna` を `model/list`、thread、turn、reroute の各段階で固定し、利用不能時はフォールバックしない
 - Salesforce は Authorization Code + PKCE と Bulk API 2.0 Upsert。法人番号を外部IDにする
+- 電話番号は `search.company_documents.phone` を法人番号で結合し、画面・CSV・SalesforceのPhoneへ流す（同梱runtimeの電話件数は0件）
 
 ## Windowsビルド
 
