@@ -1,5 +1,28 @@
 # 最短クイックスタート
 
+## 0.9 完全版を使う場合
+
+完全版ZIPは`data`を自動検出します。まず状態を確認します。
+
+```powershell
+.\queria-master-cli\queria-master.exe app-health
+```
+
+設定変更:
+
+```powershell
+.\queria-master-cli\queria-master.exe configure --home D:\Queria
+```
+
+GUIは右上の［設定・診断］から同じ設定を保存できます。検索用runtime DBとindexの`generation_id`が一致しない場合は検索を開始しません。
+
+本社代表連絡先と分離した公開事業所リスト:
+
+```powershell
+.\queria-master-cli\queria-master.exe establishment-list `
+  --prefecture 東京都 --limit 10000 --out .\tokyo-establishments.csv
+```
+
 ## Windows
 
 1. ZIP を展開

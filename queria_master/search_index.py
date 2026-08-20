@@ -12,10 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .resources import DEFAULT_DB, PROJECT_ROOT
+from .resources import PROJECT_ROOT
+from .runtime import DEFAULT_RUNTIME_DB
 
 
-SEARCH_INDEX_VERSION = "5"
+SEARCH_INDEX_VERSION = "7"
 DEFAULT_SEARCH_INDEX = PROJECT_ROOT / "data" / "search.sqlite"
 _BATCH_SIZE = 20_000
 _MAX_TRIGRAM_QUERY_LENGTH = 256
@@ -36,6 +37,7 @@ SEARCH_RESULT_COLUMNS = (
     "phone",
     "email",
     "inquiry_form_url",
+    "corporate_kind_code",
 )
 
 
@@ -106,6 +108,19 @@ def _refresh_info(con: Any) -> tuple[str, str]:
     return str(row[0] or ""), str(row[1] or "")
 
 
+def _runtime_generation_id(con: Any) -> str:
+    try:
+        row = con.execute(
+            "SELECT manifest_json FROM meta.runtime_manifest ORDER BY built_at DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return ""
+        payload = json.loads(str(row[0]))
+        return str(payload.get("generation_id") or "") if isinstance(payload, dict) else ""
+    except Exception:
+        return ""
+
+
 def _company_select(con: Any) -> tuple[str, list[str]]:
     source_relation = "core.companies"
     try:
@@ -142,7 +157,8 @@ def _company_select(con: Any) -> tuple[str, list[str]]:
         f"{pick('jsic_codes_all_raw')}, "
         f"{pick('phone')}, "
         f"{pick('email')}, "
-        f"{pick('inquiry_form_url')} "
+        f"{pick('inquiry_form_url')}, "
+        f"{pick('corporate_kind_code')} "
         # The index has its own monotonically increasing doc_id.  Avoiding a
         # 5.8-million-row sort keeps the extraction cursor streaming and
         # materially reduces peak DuckDB memory during index construction.
@@ -165,6 +181,7 @@ def _company_select(con: Any) -> tuple[str, list[str]]:
         "phone",
         "email",
         "inquiry_form_url",
+        "corporate_kind_code",
     ]
 
 
@@ -182,7 +199,7 @@ def _configure_sqlite(con: sqlite3.Connection) -> None:
 
 
 def build_search_index(
-    database_path: Path = DEFAULT_DB,
+    database_path: Path = DEFAULT_RUNTIME_DB,
     output_path: Path = DEFAULT_SEARCH_INDEX,
     *,
     batch_size: int = _BATCH_SIZE,
@@ -210,6 +227,7 @@ def build_search_index(
         db_con.execute("PRAGMA memory_limit='1GB'")
         db_con.execute(f"SET temp_directory={_sql_path(temp_dir)}")
         refresh_id, scope = _refresh_info(db_con)
+        runtime_generation_id = _runtime_generation_id(db_con)
         select_sql, _ = _company_select(db_con)
         # The Python DuckDB fetch API needs pyarrow for true record-batch
         # streaming.  Use DuckDB's streaming CSV writer instead so the base
@@ -249,6 +267,7 @@ def build_search_index(
                 phone TEXT,
                 email TEXT,
                 inquiry_form_url TEXT
+                ,corporate_kind_code TEXT
             );
             CREATE TABLE company_categories (
                 doc_id INTEGER NOT NULL,
@@ -277,8 +296,9 @@ def build_search_index(
                 doc_id, corporate_number, company_name, full_address,
                 prefecture_name, city_name, jsic_major_codes, jsic_middle_codes,
                 employee_number, capital_stock, representative_name, company_url,
-                business_summary, business_items_raw, phone, email, inquiry_form_url
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                business_summary, business_items_raw, phone, email, inquiry_form_url,
+                corporate_kind_code
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         fts_sql = """
             INSERT INTO company_fts(rowid, company_name, full_address,
@@ -298,7 +318,7 @@ def build_search_index(
                 fts_rows = []
                 category_rows = []
                 for row in rows:
-                    if len(row) != 17:
+                    if len(row) != 18:
                         raise SearchIndexError(f"法人エクスポートの列数が不正です: {len(row)}")
                     values = [value if value != "" else None for value in row]
                     doc_id += 1
@@ -329,6 +349,7 @@ def build_search_index(
                             None if values[14] is None else str(values[14]),
                             None if values[15] is None else str(values[15]),
                             None if values[16] is None else str(values[16]),
+                            None if values[17] is None else str(values[17]),
                         )
                     )
                     fts_rows.append((doc_id, *searchable))
@@ -360,6 +381,7 @@ def build_search_index(
             CREATE INDEX idx_company_docs_prefecture ON company_docs(prefecture_name);
             CREATE INDEX idx_company_docs_city ON company_docs(city_name);
             CREATE INDEX idx_company_docs_company_name ON company_docs(company_name COLLATE NOCASE);
+            CREATE INDEX idx_company_docs_corporate_kind ON company_docs(corporate_kind_code, doc_id);
             CREATE INDEX idx_company_categories_major ON company_categories(major_code, prefecture_name, doc_id);
             CREATE INDEX idx_company_categories_middle ON company_categories(middle_code, prefecture_name, doc_id);
             CREATE INDEX idx_company_categories_doc ON company_categories(doc_id);
@@ -386,6 +408,8 @@ def build_search_index(
             ),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
+        if runtime_generation_id:
+            metadata["runtime_generation_id"] = runtime_generation_id
         sqlite_con.executemany(
             "INSERT INTO index_metadata(key, value) VALUES (?, ?)",
             list(metadata.items()),
@@ -439,6 +463,39 @@ class SearchIndex:
         # 31GB DuckDB only to read refresh_log made every short CLI query pay a
         # multi-second startup penalty.  Older indexes without these fields
         # retain the conservative DuckDB fallback below.
+        expected_generation = self.metadata.get("runtime_generation_id")
+        if expected_generation:
+            try:
+                import duckdb
+
+                con = duckdb.connect(str(database_path), read_only=True)
+                try:
+                    actual_generation = _runtime_generation_id(con)
+                finally:
+                    con.close()
+            except Exception as exc:
+                self.close()
+                raise SearchIndexError(f"検索用Runtime DBを検証できません: {database_path}") from exc
+            if not actual_generation:
+                self.close()
+                raise SearchIndexError("Runtime DBにgeneration_idがありません。build-runtimeを再実行してください。")
+            if actual_generation != expected_generation:
+                self.close()
+                raise SearchIndexError(
+                    "Runtime DBと検索索引のgeneration_idが一致しません。"
+                    "同じ更新で生成したファイルを選択してください。"
+                )
+            try:
+                expected_bytes = self.metadata.get("source_database_bytes")
+                if expected_bytes is not None and int(expected_bytes) != database_path.stat().st_size:
+                    self.close()
+                    raise SearchIndexError("検索索引の原本Runtime DBサイズが一致しません。")
+            except SearchIndexError:
+                raise
+            except (OSError, TypeError, ValueError) as exc:
+                self.close()
+                raise SearchIndexError(f"Runtime DBのサイズを検証できません: {database_path}") from exc
+            return
         try:
             database_stat = database_path.stat()
             expected_bytes = self.metadata.get("source_database_bytes")
@@ -504,6 +561,7 @@ class SearchIndex:
         city: str | None = None,
         industry_majors: Iterable[str] = (),
         industry_middles: Iterable[str] = (),
+        corporate_kinds: Iterable[str] = (),
         min_employees: int | None = None,
         max_employees: int | None = None,
         min_capital: int | None = None,
@@ -521,6 +579,7 @@ class SearchIndex:
         params: list[Any] = []
         majors = [str(code).strip().upper() for code in industry_majors if str(code).strip()]
         middles = [str(code).strip() for code in industry_middles if str(code).strip()]
+        kinds = [str(code).strip() for code in corporate_kinds if str(code).strip()]
         # A single category code can be driven directly from its covering index.
         # This avoids scanning all companies in a prefecture before applying the
         # category predicate.  For multiple codes we retain EXISTS semantics to
@@ -607,6 +666,10 @@ class SearchIndex:
         if city:
             where.append("d.city_name LIKE ? ESCAPE '\\'")
             params.append(f"%{_escape_like(city)}%")
+        if kinds:
+            placeholders = ", ".join("?" for _ in kinds)
+            where.append(f"d.corporate_kind_code IN ({placeholders})")
+            params.extend(kinds)
         if min_employees is not None:
             where.append("d.employee_number >= ?")
             params.append(min_employees)
@@ -651,6 +714,7 @@ class SearchIndex:
                 d.phone,
                 d.email,
                 d.inquiry_form_url
+                ,d.corporate_kind_code
             FROM {from_clause}
             WHERE {' AND '.join(where)}
             {order_by}

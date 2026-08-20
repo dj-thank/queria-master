@@ -29,18 +29,25 @@ class SearchIndexTests(unittest.TestCase):
                     """
                     CREATE TABLE core.companies AS
                     SELECT * FROM (VALUES
-                        ('1000000000001', 'ソフトウェア開発株式会社', '東京都', '渋谷区', 'G', '39', 'G|G39', 20, 1000000, 'https://software.example.jp', 'ソフトウェア開発'),
-                        ('1000000000002', '食品製造株式会社', '大阪府', '大阪市', 'E', '09', 'E|E09', 10, 500000, 'https://food.example.jp', '食品製造'),
-                        ('1000000000003', 'クラウドサービス株式会社', '東京都', '港区', 'G', '40', 'G|G40', 30, 2000000, 'https://cloud.example.jp', 'クラウドサービス'),
-                        ('1000000000004', 'ソフト開発ウェア株式会社', '東京都', '新宿区', 'G', '39', 'G|G39', 5, 100000, 'https://near.example.jp', 'ソフト開発ウェア')
+                        ('1000000000001', 'ソフトウェア開発株式会社', '東京都', '渋谷区', 'G', '39', 'G|G39', 20, 1000000, 'https://software.example.jp', 'ソフトウェア開発', '301'),
+                        ('1000000000002', '食品製造株式会社', '大阪府', '大阪市', 'E', '09', 'E|E09', 10, 500000, 'https://food.example.jp', '食品製造', '301'),
+                        ('1000000000003', 'クラウドサービス株式会社', '東京都', '港区', 'G', '40', 'G|G40', 30, 2000000, 'https://cloud.example.jp', 'クラウドサービス', '101'),
+                        ('1000000000004', 'ソフト開発ウェア株式会社', '東京都', '新宿区', 'G', '39', 'G|G39', 5, 100000, 'https://near.example.jp', 'ソフト開発ウェア', '301')
                     ) AS t(corporate_number, company_name, prefecture_name, city_name,
                            jsic_major_codes_all, jsic_middle_codes_all, jsic_codes_all_raw,
                            employee_number, capital_stock,
-                           company_url, business_summary)
+                           company_url, business_summary, corporate_kind_code)
                     """
                 )
                 con.execute(
                     "CREATE TABLE meta.refresh_log AS SELECT 'refresh-1' AS refresh_id, 'all-public' AS scope"
+                )
+                con.execute(
+                    """
+                    CREATE TABLE meta.runtime_manifest AS
+                    SELECT '2' AS schema_version, current_timestamp AS built_at,
+                           '{"generation_id":"generation-a"}' AS manifest_json
+                    """
                 )
                 con.execute("CREATE SCHEMA search")
                 con.execute(
@@ -70,6 +77,7 @@ class SearchIndexTests(unittest.TestCase):
                 self.assertEqual([hit["corporate_number"] for hit in hits], ["1000000000001"])
                 self.assertLess(elapsed_ms, 1000)
                 self.assertEqual(index.metadata["refresh_id"], "refresh-1")
+                self.assertEqual(index.metadata["runtime_generation_id"], "generation-a")
 
                 regional = index.search("株式会社", prefecture="東京都", limit=10)
                 self.assertEqual(
@@ -85,6 +93,11 @@ class SearchIndexTests(unittest.TestCase):
                 self.assertEqual(
                     {hit["corporate_number"] for hit in category},
                     {"1000000000001", "1000000000003", "1000000000004"},
+                )
+                corporate_kind = index.search(None, corporate_kinds=("101",), fast=True, limit=10)
+                self.assertEqual(
+                    [hit["corporate_number"] for hit in corporate_kind],
+                    ["1000000000003"],
                 )
                 middle_category = index.search(
                     None,
@@ -122,6 +135,19 @@ class SearchIndexTests(unittest.TestCase):
                     relocated_index.search("ソフトウェア", limit=10)[0]["corporate_number"],
                     "1000000000001",
                 )
+
+            mismatched_database = root / "mismatched.duckdb"
+            shutil.copyfile(database, mismatched_database)
+            mismatch = duckdb.connect(str(mismatched_database))
+            try:
+                mismatch.execute(
+                    "UPDATE meta.runtime_manifest "
+                    "SET manifest_json = '{\"generation_id\":\"generation-b\"}'"
+                )
+            finally:
+                mismatch.close()
+            with self.assertRaisesRegex(Exception, "generation_id"):
+                SearchIndex(index_path, database_path=mismatched_database)
 
 
 if __name__ == "__main__":

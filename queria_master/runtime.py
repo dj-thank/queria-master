@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ from .resources import DEFAULT_DB, PROJECT_ROOT
 
 
 DEFAULT_RUNTIME_DB = PROJECT_ROOT / "data" / "queria_runtime.duckdb"
-RUNTIME_SCHEMA_VERSION = "1"
+RUNTIME_SCHEMA_VERSION = "2"
 
 
 class RuntimeBuildError(RuntimeError):
@@ -180,11 +181,14 @@ def _materialize_search_profile(con: Any) -> dict[str, Any]:
                 max(sales_eligibility) FILTER (WHERE contact_type = 'phone' AND status IN ('found', 'verified')) AS phone_sales_eligibility,
                 max(sales_eligibility) FILTER (WHERE contact_type = 'email' AND status IN ('found', 'verified')) AS email_sales_eligibility
             FROM enrichment.company_contact_points
+            WHERE status IN ('found', 'verified')
+              AND sales_eligibility = 'allowed'
             GROUP BY corporate_number
         ), websites AS (
             SELECT corporate_number, normalized_url AS official_url
             FROM enrichment.company_websites
-            WHERE status IN ('found', 'verified')
+            WHERE status = 'verified'
+              AND website_role = 'official_homepage'
             QUALIFY row_number() OVER (
                 PARTITION BY corporate_number
                 ORDER BY confidence DESC NULLS LAST, checked_at DESC NULLS LAST, first_seen_at DESC
@@ -266,6 +270,7 @@ def _manifest(con: Any, canonical_path: Path, enrichment_path: Path, copied: lis
     state_count = int(con.execute("SELECT count(*) FROM enrichment.enrichment_state").fetchone()[0])
     return {
         "schema_version": RUNTIME_SCHEMA_VERSION,
+        "generation_id": str(uuid.uuid4()),
         "built_at": datetime.now(timezone.utc).isoformat(),
         "canonical_database": str(canonical_path),
         "canonical_bytes": canonical_path.stat().st_size,
@@ -379,6 +384,7 @@ def build_runtime_database(
             "copied_indexes": len(source_indexes),
             "copied_views": len(source_views),
             "schema_version": RUNTIME_SCHEMA_VERSION,
+            "generation_id": manifest["generation_id"],
         }
     except Exception as exc:
         if con is not None:
@@ -408,14 +414,21 @@ def runtime_summary(runtime_path: Path = DEFAULT_RUNTIME_DB) -> dict[str, Any]:
         raise RuntimeBuildError(f"ランタイムDBがありません: {runtime_path}")
     con = _duckdb().connect(str(runtime_path), read_only=True)
     try:
+        def optional_count(relation: str) -> int:
+            try:
+                return int(con.execute(f"SELECT count(*) FROM {relation}").fetchone()[0])
+            except Exception:
+                return 0
+
         counts = {
-            "companies": int(con.execute("SELECT count(*) FROM core.companies").fetchone()[0]),
-            "search_profiles": int(con.execute("SELECT count(*) FROM search.company_documents").fetchone()[0]),
-            "enrichment_state": int(con.execute("SELECT count(*) FROM enrichment.enrichment_state").fetchone()[0]),
-            "evidence_documents": int(con.execute("SELECT count(*) FROM enrichment.evidence_documents").fetchone()[0]),
-            "contact_points": int(con.execute("SELECT count(*) FROM enrichment.company_contact_points").fetchone()[0]),
-            "websites": int(con.execute("SELECT count(*) FROM enrichment.company_websites").fetchone()[0]),
-            "locations": int(con.execute("SELECT count(*) FROM enrichment.company_locations").fetchone()[0]),
+            "companies": optional_count("core.companies"),
+            "search_profiles": optional_count("search.company_documents"),
+            "enrichment_state": optional_count("enrichment.enrichment_state"),
+            "evidence_documents": optional_count("enrichment.evidence_documents"),
+            "contact_points": optional_count("enrichment.company_contact_points"),
+            "establishments": optional_count("enrichment.company_establishments"),
+            "websites": optional_count("enrichment.company_websites"),
+            "locations": optional_count("enrichment.company_locations"),
         }
         manifest_row = con.execute(
             "SELECT manifest_json FROM meta.runtime_manifest ORDER BY built_at DESC LIMIT 1"
