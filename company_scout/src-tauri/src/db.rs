@@ -126,6 +126,14 @@ impl Db {
               report_json VARCHAR NOT NULL,
               created_at TIMESTAMP DEFAULT current_timestamp
             );
+
+            CREATE TABLE IF NOT EXISTS company_contact_overrides (
+              corporate_number VARCHAR PRIMARY KEY,
+              phone VARCHAR,
+              source_url VARCHAR NOT NULL,
+              evidence_text VARCHAR,
+              collected_at TIMESTAMP DEFAULT current_timestamp
+            );
             "#,
         )?;
 
@@ -275,6 +283,74 @@ impl Db {
         conn.execute_batch(&sql)?;
         let count_sql = format!("SELECT least(count(*), {}) FROM companies c WHERE {}", plan.limit, where_sql);
         let count: i64 = conn.query_row(&count_sql, [], |r| r.get(0))?;
+        Ok(count.max(0) as u64)
+    }
+
+    pub fn export_search_xlsx(&self, plan: SearchPlan, path: &Path) -> Result<u64> {
+        let plan = plan.normalize();
+        if plan.limit > 1_048_575 {
+            return Err(anyhow!("XLSXは1シートあたり最大1,048,575社です。全件出力はCSVを使用してください"));
+        }
+        let where_sql = build_where(&plan);
+        let limit = plan.limit;
+        let query_sql = format!(
+            r#"SELECT
+              corporate_number,name,prefecture,city,address,kind,
+              industry_code,industry_name,industry_source,
+              inferred_industry_code,inferred_industry_name,inferred_industry_confidence,
+              employees,capital,established_year,website,phone,representative,business_summary,source_updated_at
+            FROM companies c
+            WHERE {where_sql}
+            ORDER BY name, corporate_number
+            LIMIT {limit}"#
+        );
+        let count_sql = format!("SELECT count(*) FROM ({query_sql}) export_rows");
+        let conn = self.connect()?;
+        let count: i64 = conn.query_row(&count_sql, [], |r| r.get(0))?;
+        let mut stmt = conn.prepare(&query_sql)?;
+        let mut rows = stmt.query([])?;
+
+        let mut workbook = rust_xlsxwriter::Workbook::new();
+        let worksheet = workbook.add_worksheet_with_constant_memory();
+        let headers = [
+            "法人番号", "会社名", "都道府県", "市区町村", "住所", "法人種別", "業種コード", "業種名",
+            "業種ソース", "AI推定業種コード", "AI推定業種名", "AI推定信頼度", "従業員数", "資本金",
+            "設立年", "Webサイト", "電話", "代表者", "事業概要", "更新日時",
+        ];
+        for (column, header) in headers.iter().enumerate() {
+            worksheet.write_string(0, column as u16, *header)?;
+        }
+        let mut output_row: u32 = 1;
+        while let Some(row) = rows.next()? {
+            let company = company_from_row(row)?;
+            let values = [
+                company.corporate_number,
+                company.name,
+                company.prefecture.unwrap_or_default(),
+                company.city.unwrap_or_default(),
+                company.address.unwrap_or_default(),
+                company.kind.unwrap_or_default(),
+                company.industry_code.unwrap_or_default(),
+                company.industry_name.unwrap_or_default(),
+                company.industry_source.unwrap_or_default(),
+                company.inferred_industry_code.unwrap_or_default(),
+                company.inferred_industry_name.unwrap_or_default(),
+                company.inferred_industry_confidence.map(|v| v.to_string()).unwrap_or_default(),
+                company.employees.map(|v| v.to_string()).unwrap_or_default(),
+                company.capital.map(|v| v.to_string()).unwrap_or_default(),
+                company.established_year.map(|v| v.to_string()).unwrap_or_default(),
+                company.website.unwrap_or_default(),
+                company.phone.unwrap_or_default(),
+                company.representative.unwrap_or_default(),
+                company.business_summary.unwrap_or_default(),
+                company.source_updated_at.unwrap_or_default(),
+            ];
+            for (column, value) in values.iter().enumerate() {
+                worksheet.write_string(output_row, column as u16, value.as_str())?;
+            }
+            output_row = output_row.saturating_add(1);
+        }
+        workbook.save(path).with_context(|| format!("XLSXを書き出せません: {}", path.display()))?;
         Ok(count.max(0) as u64)
     }
 
@@ -484,7 +560,7 @@ fn attach_runtime(conn: &Connection, runtime_path: &Path) -> Result<()> {
 fn ensure_runtime_view(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
-        CREATE VIEW IF NOT EXISTS companies AS
+        CREATE OR REPLACE VIEW companies AS
         SELECT
           base.corporate_number,
           base.company_name AS name,
@@ -506,7 +582,7 @@ fn ensure_runtime_view(conn: &Connection) -> Result<()> {
           try_cast(base.capital_stock AS BIGINT) AS capital,
           try_cast(base.founding_year AS INTEGER) AS established_year,
           base.company_url AS website,
-          contacts.phone AS phone,
+          coalesce(local_contacts.phone, contacts.phone) AS phone,
           base.representative_name AS representative,
           base.business_summary,
           base.business_items_raw AS business_items,
@@ -523,10 +599,23 @@ fn ensure_runtime_view(conn: &Connection) -> Result<()> {
           CAST(base.extracted_at AS VARCHAR) AS source_updated_at
         FROM queria_runtime.core.companies AS base
         LEFT JOIN queria_runtime.search.company_documents AS contacts
-          ON contacts.corporate_number = base.corporate_number;
+          ON contacts.corporate_number = base.corporate_number
+        LEFT JOIN company_contact_overrides AS local_contacts
+          ON local_contacts.corporate_number = base.corporate_number;
         "#,
     )?;
     Ok(())
+}
+
+impl Db {
+    pub fn save_phone_override(&self, corporate_number: &str, phone: &str, source_url: &str, evidence: &str) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO company_contact_overrides(corporate_number,phone,source_url,evidence_text,collected_at) VALUES(?,?,?,?,current_timestamp)",
+            duckdb::params![corporate_number, phone, source_url, evidence],
+        )?;
+        Ok(())
+    }
 }
 
 fn company_from_row(row: &Row<'_>) -> duckdb::Result<Company> {

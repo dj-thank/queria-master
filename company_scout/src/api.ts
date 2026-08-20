@@ -5,6 +5,9 @@ import type {
   DataStatus,
   ResearchReport,
   SalesforceStatus,
+  SalesforceFieldMapping,
+  SalesforceJobStatus,
+  PhoneCollectionResult,
   SavedSearch,
   SearchPlan,
   SearchResult,
@@ -20,6 +23,8 @@ export const api = {
   recentSearches: (limit = 12) => invoke<SavedSearch[]>("recent_searches", { limit }),
   exportCsv: (plan: SearchPlan, path: string) =>
     invoke<number>("export_search_csv", { plan, path }),
+  exportXlsx: (plan: SearchPlan, path: string) =>
+    invoke<number>("export_search_xlsx", { plan, path }),
   addToList: (listName: string, corporateNumbers: string[]) =>
     invoke<number>("add_to_list", { listName, corporateNumbers }),
   addSearchToList: (listName: string, plan: SearchPlan) =>
@@ -31,6 +36,8 @@ export const api = {
   planSearch: (query: string) => invoke<SearchPlan>("codex_plan_search", { query }),
   researchCompany: (company: Company, instruction: string) =>
     invoke<ResearchReport>("codex_research_company", { company, instruction }),
+  collectCompanyPhone: (company: Company) =>
+    invoke<PhoneCollectionResult>("collect_company_phone", { company }),
 
   duckdbStatus: () => invoke<{ available: boolean; version: string; engine: string; remote_catalog_mode: string }>("duckdb_native_status"),
   syncDuckDb: () => invoke<{ imported: number; source: string; duckdb_version: string }>("sync_duckdb_company_master"),
@@ -40,10 +47,13 @@ export const api = {
   salesforceStatus: () => invoke<SalesforceStatus>("salesforce_status"),
   salesforceLogin: (loginUrl: string, clientId: string) =>
     invoke<{ auth_url: string }>("salesforce_login_start", { loginUrl, clientId }),
-  salesforceUpsertList: (listName: string, objectName: string, externalIdField: string) =>
+  salesforceUpsertList: (listName: string, objectName: string, externalIdField: string, mapping: SalesforceFieldMapping[]) =>
     invoke<{ accepted: number; job_id: string }>("salesforce_upsert_list", {
       listName,
       objectName,
       externalIdField,
+      mapping,
     }),
+  salesforceJobStatus: (jobId: string) => invoke<SalesforceJobStatus>("salesforce_job_status", { jobId }),
+  salesforceRetryFailed: (jobId: string) => invoke<{ accepted: number; job_id: string }>("salesforce_retry_failed", { jobId }),
 };

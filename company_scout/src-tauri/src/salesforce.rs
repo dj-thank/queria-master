@@ -7,8 +7,11 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use url::Url;
 
 const SERVICE: &str = "CompanyMaster.Salesforce";
@@ -29,6 +32,22 @@ pub struct SalesforceUpsertResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldMapping {
+    pub source: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SalesforceJobStatus {
+    pub job_id: String,
+    pub state: String,
+    pub number_records_processed: u64,
+    pub number_records_failed: u64,
+    pub number_records_total: u64,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredCredentials {
     login_url: String,
     client_id: String,
@@ -39,13 +58,22 @@ struct StoredCredentials {
 }
 
 #[derive(Clone)]
+struct StoredJob {
+    companies: Vec<Company>,
+    object_name: String,
+    external_id_field: String,
+    mapping: Vec<FieldMapping>,
+}
+
+#[derive(Clone)]
 pub struct SalesforceManager {
     client: Client,
+    jobs: Arc<Mutex<HashMap<String, StoredJob>>>,
 }
 
 impl SalesforceManager {
     pub fn new() -> Result<Self> {
-        Ok(Self { client: Client::builder().user_agent("CompanyMaster/0.2").build()? })
+        Ok(Self { client: Client::builder().user_agent("CompanyMaster/0.2").build()?, jobs: Arc::new(Mutex::new(HashMap::new())) })
     }
 
     pub async fn status(&self) -> SalesforceStatus {
@@ -91,10 +119,11 @@ impl SalesforceManager {
         Ok(SalesforceLoginStart { auth_url: url.to_string() })
     }
 
-    pub async fn upsert(&self, companies: &[Company], object_name: &str, external_id_field: &str) -> Result<SalesforceUpsertResult> {
+    pub async fn upsert(&self, companies: &[Company], object_name: &str, external_id_field: &str, mapping: &[FieldMapping]) -> Result<SalesforceUpsertResult> {
         if companies.is_empty() { return Err(anyhow!("Salesforceへ送る企業がありません")); }
         let object_name = safe_api_name(object_name, "Object API名")?;
         let external_id_field = safe_api_name(external_id_field, "外部ID項目")?;
+        let mapping = normalize_mapping(mapping, &external_id_field)?;
         let mut creds = load_credentials().context("Salesforceに接続してください")?;
 
         let body = json!({
@@ -115,7 +144,7 @@ impl SalesforceManager {
         if !status.is_success() { return Err(anyhow!("Bulk API job作成失敗 ({status}): {value}")); }
         let job_id = value.get("id").and_then(Value::as_str).ok_or_else(|| anyhow!("Bulk API job idがありません"))?.to_string();
 
-        let csv = build_csv(companies, &object_name, &external_id_field)?;
+        let csv = build_csv(companies, &mapping)?;
         let batch_url = format!("{}/services/data/{}/jobs/ingest/{}/batches", creds.instance_url, API_VERSION, job_id);
         let upload = self.client.put(&batch_url)
             .bearer_auth(&creds.access_token)
@@ -134,7 +163,60 @@ impl SalesforceManager {
             let t = close.text().await.unwrap_or_default();
             return Err(anyhow!("Bulk API job確定失敗 ({s}): {t}"));
         }
+        self.jobs.lock().await.insert(job_id.clone(), StoredJob {
+            companies: companies.to_vec(), object_name, external_id_field, mapping,
+        });
         Ok(SalesforceUpsertResult { accepted: companies.len() as u64, job_id })
+    }
+
+    pub async fn job_status(&self, job_id: &str) -> Result<SalesforceJobStatus> {
+        let mut creds = load_credentials().context("Salesforceに接続してください")?;
+        let url = format!("{}/services/data/{}/jobs/ingest/{}", creds.instance_url, API_VERSION, safe_job_id(job_id)?);
+        let mut response = self.client.get(&url).bearer_auth(&creds.access_token).send().await?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            creds = self.refresh(creds).await?;
+            response = self.client.get(&url).bearer_auth(&creds.access_token).send().await?;
+        }
+        let status = response.status();
+        let value: Value = response.json().await.unwrap_or(Value::Null);
+        if !status.is_success() { return Err(anyhow!("Bulk APIジョブ状態取得失敗 ({status}): {value}")); }
+        Ok(SalesforceJobStatus {
+            job_id: job_id.to_string(),
+            state: value.get("state").and_then(Value::as_str).unwrap_or("Unknown").to_string(),
+            number_records_processed: json_u64(&value, "numberRecordsProcessed"),
+            number_records_failed: json_u64(&value, "numberRecordsFailed"),
+            number_records_total: json_u64(&value, "numberRecordsTotal"),
+            error_message: value.get("errorMessage").and_then(Value::as_str).map(str::to_string),
+        })
+    }
+
+    pub async fn retry_failed(&self, job_id: &str) -> Result<SalesforceUpsertResult> {
+        let job = self.jobs.lock().await.get(job_id).cloned().ok_or_else(|| anyhow!("このアプリ起動後のジョブ情報がありません。元リストから再送してください"))?;
+        let mut creds = load_credentials().context("Salesforceに接続してください")?;
+        let url = format!("{}/services/data/{}/jobs/ingest/{}/failedResults", creds.instance_url, API_VERSION, safe_job_id(job_id)?);
+        let mut response = self.client.get(&url).bearer_auth(&creds.access_token).send().await?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            creds = self.refresh(creds).await?;
+            response = self.client.get(&url).bearer_auth(&creds.access_token).send().await?;
+        }
+        let status = response.status();
+        let body = response.bytes().await?;
+        if !status.is_success() { return Err(anyhow!("失敗行取得失敗 ({status}): {}", String::from_utf8_lossy(&body))); }
+        let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(body.as_ref());
+        let headers = reader.headers()?.clone();
+        let key_index = headers.iter().position(|h| h == job.external_id_field)
+            .ok_or_else(|| anyhow!("失敗結果に外部ID列 {} がありません", job.external_id_field))?;
+        let mut failed_keys = HashSet::new();
+        for row in reader.records() {
+            let row = row?;
+            if let Some(value) = row.get(key_index) { failed_keys.insert(value.to_string()); }
+        }
+        if failed_keys.is_empty() { return Err(anyhow!("Salesforceが返した失敗行は0件です")); }
+        let failed_companies: Vec<Company> = job.companies.into_iter()
+            .filter(|company| failed_keys.contains(&company.corporate_number))
+            .collect();
+        if failed_companies.is_empty() { return Err(anyhow!("失敗行の法人番号を元リストから特定できません")); }
+        self.upsert(&failed_companies, &job.object_name, &job.external_id_field, &job.mapping).await
     }
 
     async fn refresh(&self, mut creds: StoredCredentials) -> Result<StoredCredentials> {
@@ -222,30 +304,84 @@ async fn fetch_username(client: &Client, instance_url: &str, token: &str) -> Res
     Ok(value.get("preferred_username").or_else(|| value.get("email")).and_then(Value::as_str).unwrap_or("Salesforce user").to_string())
 }
 
-fn build_csv(companies: &[Company], object_name: &str, external_id_field: &str) -> Result<Vec<u8>> {
+fn build_csv(companies: &[Company], mapping: &[FieldMapping]) -> Result<Vec<u8>> {
     let mut writer = csv::WriterBuilder::new().lineterminator(csv::Terminator::Any(b'\n')).from_writer(Vec::new());
-    if object_name.eq_ignore_ascii_case("Account") {
-        writer.write_record(["Name", external_id_field, "Website", "Phone", "BillingState", "BillingCity", "BillingStreet", "Industry", "NumberOfEmployees", "Description"])?;
-        for c in companies {
-            let row = vec![
-                c.name.clone(),
-                c.corporate_number.clone(),
-                c.website.clone().unwrap_or_default(),
-                c.phone.clone().unwrap_or_default(),
-                c.prefecture.clone().unwrap_or_default(),
-                c.city.clone().unwrap_or_default(),
-                c.address.clone().unwrap_or_default(),
-                c.industry_name.clone().or_else(|| c.inferred_industry_name.clone()).unwrap_or_default(),
-                c.employees.map(|v| v.to_string()).unwrap_or_default(),
-                c.business_summary.clone().unwrap_or_default(),
-            ];
-            writer.write_record(&row)?;
-        }
-    } else {
-        writer.write_record(["Name", external_id_field])?;
-        for c in companies { writer.write_record([c.name.as_str(), c.corporate_number.as_str()])?; }
+    let headers: Vec<&str> = mapping.iter().map(|field| field.target.as_str()).collect();
+    writer.write_record(&headers)?;
+    for company in companies {
+        let row: Vec<String> = mapping.iter().map(|field| value_for_source(company, &field.source)).collect();
+        writer.write_record(&row)?;
     }
     writer.into_inner().map_err(|e| anyhow!(e.to_string()))
+}
+
+fn normalize_mapping(mapping: &[FieldMapping], external_id_field: &str) -> Result<Vec<FieldMapping>> {
+    let mut out = if mapping.is_empty() {
+        default_mapping(external_id_field)
+    } else {
+        mapping.to_vec()
+    };
+    let allowed = ["name", "corporate_number", "website", "phone", "prefecture", "city", "address", "industry", "industry_code", "employees", "capital", "established_year", "representative", "business_summary"];
+    for field in &mut out {
+        field.source = field.source.trim().to_string();
+        field.target = safe_api_name(&field.target, "Salesforce項目")?;
+        if !allowed.contains(&field.source.as_str()) { return Err(anyhow!("未対応のCompanyMaster項目です: {}", field.source)); }
+    }
+    if !out.iter().any(|field| field.source == "corporate_number" && field.target == external_id_field) {
+        out.insert(0, FieldMapping { source: "corporate_number".to_string(), target: external_id_field.to_string() });
+    }
+    let mut targets = HashSet::new();
+    for field in &out {
+        if !targets.insert(field.target.clone()) { return Err(anyhow!("Salesforce項目が重複しています: {}", field.target)); }
+    }
+    Ok(out)
+}
+
+fn default_mapping(external_id_field: &str) -> Vec<FieldMapping> {
+    vec![
+        FieldMapping { source: "name".into(), target: "Name".into() },
+        FieldMapping { source: "corporate_number".into(), target: external_id_field.into() },
+        FieldMapping { source: "website".into(), target: "Website".into() },
+        FieldMapping { source: "phone".into(), target: "Phone".into() },
+        FieldMapping { source: "prefecture".into(), target: "BillingState".into() },
+        FieldMapping { source: "city".into(), target: "BillingCity".into() },
+        FieldMapping { source: "address".into(), target: "BillingStreet".into() },
+        FieldMapping { source: "industry".into(), target: "Industry".into() },
+        FieldMapping { source: "employees".into(), target: "NumberOfEmployees".into() },
+        FieldMapping { source: "business_summary".into(), target: "Description".into() },
+    ]
+}
+
+fn value_for_source(company: &Company, source: &str) -> String {
+    match source {
+        "name" => company.name.clone(),
+        "corporate_number" => company.corporate_number.clone(),
+        "website" => company.website.clone().unwrap_or_default(),
+        "phone" => company.phone.clone().unwrap_or_default(),
+        "prefecture" => company.prefecture.clone().unwrap_or_default(),
+        "city" => company.city.clone().unwrap_or_default(),
+        "address" => company.address.clone().unwrap_or_default(),
+        "industry" => company.industry_name.clone().or_else(|| company.inferred_industry_name.clone()).unwrap_or_default(),
+        "industry_code" => company.industry_code.clone().or_else(|| company.inferred_industry_code.clone()).unwrap_or_default(),
+        "employees" => company.employees.map(|value| value.to_string()).unwrap_or_default(),
+        "capital" => company.capital.map(|value| value.to_string()).unwrap_or_default(),
+        "established_year" => company.established_year.map(|value| value.to_string()).unwrap_or_default(),
+        "representative" => company.representative.clone().unwrap_or_default(),
+        "business_summary" => company.business_summary.clone().unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+fn json_u64(value: &Value, key: &str) -> u64 {
+    value.get(key).and_then(Value::as_u64).or_else(|| value.get(key).and_then(Value::as_i64).map(|v| v.max(0) as u64)).unwrap_or(0)
+}
+
+fn safe_job_id(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() || !value.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-') {
+        return Err(anyhow!("Bulk API job idが不正です"));
+    }
+    Ok(value.to_string())
 }
 
 fn entry() -> Result<Entry> {

@@ -99,3 +99,22 @@ export type SalesforceStatus = {
   instance_url?: string | null;
   api_version: string;
 };
+
+export type SalesforceFieldMapping = {
+  source: string;
+  target: string;
+};
+
+export type SalesforceJobStatus = {
+  job_id: string;
+  state: string;
+  number_records_processed: number;
+  number_records_failed: number;
+  number_records_total: number;
+  error_message?: string | null;
+};
+
+export type PhoneCollectionResult = {
+  phone?: string | null;
+  source_url: string;
+};

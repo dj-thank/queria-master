@@ -31,6 +31,8 @@ import type {
   DataStatus,
   ResearchReport,
   SalesforceStatus,
+  SalesforceFieldMapping,
+  SalesforceJobStatus,
   SavedSearch,
   SearchPlan,
   SearchResult,
@@ -71,6 +73,10 @@ function App() {
   const [codex, setCodex] = useState<CodexStatus | null>(null);
   const [data, setData] = useState<DataStatus | null>(null);
   const [salesforce, setSalesforce] = useState<SalesforceStatus | null>(null);
+  const [salesforceJob, setSalesforceJob] = useState<SalesforceJobStatus | null>(null);
+  const [sfObjectName, setSfObjectName] = useState("Account");
+  const [sfExternalId, setSfExternalId] = useState("CorporateNumber__c");
+  const [sfMappingText, setSfMappingText] = useState("name=Name\ncorporate_number=CorporateNumber__c\nwebsite=Website\nphone=Phone\nprefecture=BillingState\ncity=BillingCity\naddress=BillingStreet\nindustry=Industry\nemployees=NumberOfEmployees\nbusiness_summary=Description");
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string>("");
   const [listName, setListName] = useState("営業候補");
@@ -200,6 +206,25 @@ function App() {
     }
   }
 
+  async function collectPhone() {
+    if (!selected) return;
+    setBusy("phone");
+    try {
+      const value = await api.collectCompanyPhone(selected);
+      if (value.phone) {
+        setSelected({ ...selected, phone: value.phone });
+        setResult((current) => current ? { ...current, rows: current.rows.map((row) => row.corporate_number === selected.corporate_number ? { ...row, phone: value.phone } : row) } : current);
+        setMessage(`公式サイトから電話番号 ${value.phone} を取得しました。`);
+      } else {
+        setMessage("公式サイトから電話番号を確認できませんでした。");
+      }
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function exportCsv() {
     const path = await save({ defaultPath: "company-list.csv", filters: [{ name: "CSV", extensions: ["csv"] }] });
     if (!path) return;
@@ -207,6 +232,20 @@ function App() {
     try {
       const count = await api.exportCsv(plan, path);
       setMessage(`${fmt.format(count)}件をCSVに出力しました。`);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function exportXlsx() {
+    const path = await save({ defaultPath: "company-list.xlsx", filters: [{ name: "Excel", extensions: ["xlsx"] }] });
+    if (!path) return;
+    setBusy("export");
+    try {
+      const count = await api.exportXlsx(plan, path);
+      setMessage(`${fmt.format(count)}件をExcel（XLSX）に出力しました。`);
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -259,9 +298,53 @@ function App() {
     if (!salesforce?.connected) return;
     setBusy("salesforce-upsert");
     try {
+      const mapping: SalesforceFieldMapping[] = sfMappingText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+        const [source, ...targetParts] = line.split("=");
+        return { source: source.trim(), target: targetParts.join("=").trim() };
+      }).filter((field) => field.source && field.target);
       await api.addSearchToList(listName, plan);
-      const value = await api.salesforceUpsertList(listName, "Account", "CorporateNumber__c");
+      const value = await api.salesforceUpsertList(listName, sfObjectName, sfExternalId, mapping);
+      setSalesforceJob({ job_id: value.job_id, state: "UploadComplete", number_records_processed: 0, number_records_failed: 0, number_records_total: value.accepted, error_message: null });
       setMessage(`${fmt.format(value.accepted)}件をSalesforceへ送信しました。Bulk Job: ${value.job_id}`);
+      void pollSalesforceJob(value.job_id);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function pollSalesforceJob(jobId: string) {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      try {
+        const status = await api.salesforceJobStatus(jobId);
+        setSalesforceJob(status);
+        if (["JobComplete", "Failed", "Aborted"].includes(status.state)) return;
+      } catch {
+        return;
+      }
+    }
+  }
+
+  async function refreshSalesforceJob() {
+    if (!salesforceJob) return;
+    try {
+      const status = await api.salesforceJobStatus(salesforceJob.job_id);
+      setSalesforceJob(status);
+      setMessage(`Salesforceジョブ ${status.state}: 成功処理 ${fmt.format(status.number_records_processed)}件、失敗 ${fmt.format(status.number_records_failed)}件`);
+    } catch (error) {
+      setMessage(String(error));
+    }
+  }
+
+  async function retrySalesforceFailed() {
+    if (!salesforceJob) return;
+    setBusy("salesforce-retry");
+    try {
+      const value = await api.salesforceRetryFailed(salesforceJob.job_id);
+      setSalesforceJob({ job_id: value.job_id, state: "UploadComplete", number_records_processed: 0, number_records_failed: 0, number_records_total: value.accepted, error_message: null });
+      setMessage(`失敗行を${fmt.format(value.accepted)}件再送しました。Bulk Job: ${value.job_id}`);
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -374,6 +457,7 @@ function App() {
                 <button className="ghost" onClick={() => void extractWithLimit(2000000)} disabled={!!busy}><Search size={15} />全件抽出</button>
                 <button className="ghost" onClick={addSearchResultsToList} disabled={!result?.rows.length || !!busy}><ListPlus size={15} />検索結果をリストへ</button>
                 <button className="ghost" onClick={exportCsv} disabled={!result || !!busy}><Download size={15} />CSV</button>
+                <button className="ghost" onClick={exportXlsx} disabled={!result || !!busy}><Download size={15} />Excel</button>
                 <button className="primary" onClick={sendListToSalesforce} disabled={!result?.rows.length || !salesforce?.connected || !!busy}><Send size={15} />Salesforce</button>
               </div>
             </div>
@@ -422,6 +506,9 @@ function App() {
                   <button className="primary full" onClick={deepResearch} disabled={busy === "research" || !codex?.authenticated || !codex?.luna_available}>
                     {busy === "research" ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />} Webまで深掘り
                   </button>
+                  <button className="ghost full" onClick={collectPhone} disabled={busy === "phone" || !selected.website}>
+                    {busy === "phone" ? <Loader2 className="spin" size={16} /> : <Search size={16} />} 公式サイトから電話番号を取得
+                  </button>
                 </> : <div className="empty-inspector"><Building2 size={30} /><span>会社を選択</span></div>}
               </aside>
             </div>
@@ -451,6 +538,13 @@ function App() {
               </ConnectionCard>
               <ConnectionCard icon={<CloudSalesforce />} title="Salesforce" status={salesforce?.connected ? "接続済み" : "未接続"} ok={!!salesforce?.connected} description="External Client App + Authorization Code/PKCE。法人番号を外部IDにしてBulk API 2.0でUpsert。">
                 <SalesforceConnect connected={!!salesforce?.connected} onMessage={setMessage} onRefresh={refreshStatus} />
+                {salesforce?.connected && <div className="sf-form sf-mapping">
+                  <input value={sfObjectName} onChange={(e) => setSfObjectName(e.target.value)} placeholder="Object API名: Account" />
+                  <input value={sfExternalId} onChange={(e) => setSfExternalId(e.target.value)} placeholder="外部ID項目: CorporateNumber__c" />
+                  <textarea value={sfMappingText} onChange={(e) => setSfMappingText(e.target.value)} rows={5} aria-label="Salesforce項目マッピング" />
+                  <small>CompanyMaster項目=Salesforce API項目（例: phone=Phone）</small>
+                  {salesforceJob && <div className="sf-job"><span>{salesforceJob.job_id} / {salesforceJob.state}</span><span>処理 {fmt.format(salesforceJob.number_records_processed)}・失敗 {fmt.format(salesforceJob.number_records_failed)}</span><div className="button-row"><button className="ghost tiny" onClick={refreshSalesforceJob}>状態更新</button><button className="ghost tiny" onClick={retrySalesforceFailed} disabled={!!busy || salesforceJob.number_records_failed === 0}>失敗行を再送</button></div></div>}
+                </div>}
               </ConnectionCard>
             </div>
             <div className="local-db"><Database size={16}/><div><strong>ローカルDB</strong><span>{data?.db_path ?? "初期化中"}</span></div></div>

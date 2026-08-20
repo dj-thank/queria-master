@@ -11,8 +11,9 @@
 - 検索結果は 100 行ずつ表示し、数万〜数百万件をブラウザ側へ一括描画しない
 - 検索条件をローカルメモリーに保存し、次回起動後に再利用
 - 企業別の公開 Web 深掘り、根拠 URL、AI 推定業種、調査メモ、根拠トランスクリプトを保存
-- 検索結果全体を名前付きリストにし、CSV 出力
+- 検索結果全体を名前付きリストにし、CSV / Excel（XLSX）出力（XLSXは1シート最大1,048,575社）
 - 電話番号は `search.company_documents.phone`（公式サイト等の証拠付き拡張層）を法人番号で結合して表示・CSV/Salesforceへ出力
+- 選択した会社の公式サイトから `tel:` リンク・JSON-LD・表示テキストを抽出し、根拠URL付きでCompanyMaster sidecarへ保存
 - Salesforce Account へ法人番号を外部 ID とした Bulk API 2.0 Upsert
 - OpenAI API キーを共有せず、利用者ごとに自分の ChatGPT アカウントで Codex にログイン
 - LLM は `gpt-5.6-luna` にハードロック。モデル選択 UI / 自動フォールバックなし
@@ -246,7 +247,7 @@ Unique: ON
 
 ブラウザで本人が Salesforce にログインします。アクセストークン / リフレッシュトークンは Windows 資格情報ストアへ保存します。
 
-検索画面でリスト名を決めて「Salesforce」を押すと、現在の検索条件全体をリスト化して Account へ Bulk API 2.0 Upsert します。画面の 100 行だけを送る処理ではありません。
+検索画面でリスト名を決めて「Salesforce」を押すと、現在の検索条件全体をリスト化して Account へ Bulk API 2.0 Upsert します。画面の 100 行だけを送る処理ではありません。送信後はジョブ状態を自動ポーリングし、失敗行の取得・再送ができます。
 
 現在の Account 標準マッピング:
 
@@ -264,7 +265,7 @@ employees                    NumberOfEmployees
 business_summary             Description
 ```
 
-Salesforce REST API version は `v67.0` に固定しています。
+Salesforce REST API version は `v67.0` に固定しています。接続画面の項目マッピング欄で、`CompanyMaster項目=Salesforce API項目` を1行ずつ指定できます。
 
 ## API / コネクター拡張
 
@@ -294,8 +295,7 @@ LLM に任意 URL や任意 SQL を無制限に実行させるのではなく、
 ## 現MVPの境界
 
 - Windows インストーラーは Windows toolchain でビルドする必要があります。
-- Salesforce の Bulk Job 作成・アップロードまでは実装済みですが、完了結果の定期ポーリング/失敗行再送 UI は次段階です。
-- Salesforce の任意カスタム項目マッピング UI はまだ固定 Account マッピングです。
+- Salesforce の失敗行再送は、同一アプリ起動中に保持したジョブ元データから法人番号を照合します。アプリ再起動後の過去ジョブは元リストから再送してください。
 - 数十万〜数百万社を 1 回の Salesforce 送信にする用途は、今後ストリーミング/分割ジョブ化した方が安全です。現 MVP は主に数万社単位を想定しています。
 - gBizINFO の属性が存在しない法人は空欄のまま残ります。母集団からは削除しません。
 - Web 推定業種は AI 推定であり、正式 JSIC と混同しません。

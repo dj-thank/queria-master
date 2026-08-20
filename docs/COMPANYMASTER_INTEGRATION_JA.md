@@ -11,7 +11,7 @@
 - 自然文の条件解釈とWeb調査は、ユーザー本人のChatGPTログインを使う Codex App Server 経由
 - `gpt-5.6-luna` を `model/list`、thread、turn、reroute の各段階で固定し、利用不能時はフォールバックしない
 - Salesforce は Authorization Code + PKCE と Bulk API 2.0 Upsert。法人番号を外部IDにする
-- 電話番号は `search.company_documents.phone` を法人番号で結合し、画面・CSV・SalesforceのPhoneへ流す（同梱runtimeの電話件数は0件）
+- 電話番号は `search.company_documents.phone` または選択企業の公式サイト抽出結果を法人番号で結合し、画面・CSV・SalesforceのPhoneへ流す
 
 ## Windowsビルド
 
@@ -34,4 +34,4 @@ $env:QUERIA_RUNTIME_DB = 'D:\Queria\data\queria_runtime.duckdb'
 
 ## 未実装・今後の拡張
 
-現統合版のファイル出力はCSV、外部連携はSalesforce Bulk API 2.0です。Excelネイティブ（XLSX）出力、細分類名の階層マスター表示、企業リスト単位の一括Web調査は次の拡張対象です。現在のCSVはExcelでそのまま開けます。
+現統合版はCSV / XLSX出力、Salesforceジョブ状態ポーリング・失敗行再送、項目マッピングUIまで実装しています。XLSXはExcelの1シート上限のため、100万社超はCSVを使用してください。企業リスト単位の一括Web調査は次の拡張対象です。

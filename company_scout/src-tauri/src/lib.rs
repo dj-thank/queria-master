@@ -9,8 +9,10 @@ use db::Db;
 use models::{CodexStatus, Company, DataStatus, ResearchReport, SalesforceStatus, SavedSearch, SearchPlan, SearchResult};
 use salesforce::SalesforceManager;
 use serde::Serialize;
+use regex::Regex;
 use std::path::PathBuf;
 use tauri::{Manager, State};
+use url::Url;
 
 struct AppState {
     db: Db,
@@ -20,6 +22,12 @@ struct AppState {
 
 #[derive(Serialize)]
 struct AuthUrl { auth_url: String }
+
+#[derive(Serialize)]
+struct PhoneCollectionResult {
+    phone: Option<String>,
+    source_url: String,
+}
 
 fn err<E: std::fmt::Display>(e: E) -> String { e.to_string() }
 
@@ -86,6 +94,12 @@ async fn export_search_csv(state: State<'_, AppState>, plan: SearchPlan, path: S
 }
 
 #[tauri::command]
+async fn export_search_xlsx(state: State<'_, AppState>, plan: SearchPlan, path: String) -> Result<u64, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || db.export_search_xlsx(plan, std::path::Path::new(&path))).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
 async fn add_to_list(state: State<'_, AppState>, list_name: String, corporate_numbers: Vec<String>) -> Result<u64, String> {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || db.add_to_list(&list_name, &corporate_numbers)).await.map_err(err)?.map_err(err)
@@ -120,6 +134,44 @@ async fn codex_research_company(state: State<'_, AppState>, company: Company, in
     let saved = report.clone();
     tokio::task::spawn_blocking(move || db.save_research(&saved)).await.map_err(err)?.map_err(err)?;
     Ok(report)
+}
+
+#[tauri::command]
+async fn collect_company_phone(state: State<'_, AppState>, company: Company) -> Result<PhoneCollectionResult, String> {
+    let website = company.website.clone().ok_or_else(|| "この会社には公式サイトURLがありません".to_string())?;
+    let parsed = Url::parse(&website).map_err(err)?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("公式サイトURLが不正です".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .user_agent("CompanyMaster/0.2 contact-enrichment")
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(err)?;
+    let response = client.get(parsed.clone()).send().await.map_err(err)?;
+    if !response.status().is_success() {
+        return Err(format!("公式サイトの取得に失敗しました: {}", response.status()));
+    }
+    if response.content_length().unwrap_or(0) > 8_000_000 {
+        return Err("公式サイトが大きすぎるため電話番号調査を中止しました".to_string());
+    }
+    let source_url = response.url().to_string();
+    let body = response.bytes().await.map_err(err)?;
+    if body.len() > 8_000_000 {
+        return Err("公式サイトが大きすぎるため電話番号調査を中止しました".to_string());
+    }
+    let html = String::from_utf8_lossy(&body);
+    let phone = extract_phone(&html);
+    if let Some(phone_value) = &phone {
+        let db = state.db.clone();
+        let corporate_number = company.corporate_number.clone();
+        let evidence = format!("公式サイト {} から電話番号候補を抽出", source_url);
+        let phone_for_db = phone_value.clone();
+        let source_for_db = source_url.clone();
+        tokio::task::spawn_blocking(move || db.save_phone_override(&corporate_number, &phone_for_db, &source_for_db, &evidence))
+            .await.map_err(err)?.map_err(err)?;
+    }
+    Ok(PhoneCollectionResult { phone, source_url })
 }
 
 #[tauri::command]
@@ -160,10 +212,21 @@ async fn salesforce_upsert_list(
     list_name: String,
     object_name: String,
     external_id_field: String,
+    mapping: Vec<salesforce::FieldMapping>,
 ) -> Result<salesforce::SalesforceUpsertResult, String> {
     let db = state.db.clone();
     let companies = tokio::task::spawn_blocking(move || db.list_companies(&list_name)).await.map_err(err)?.map_err(err)?;
-    state.salesforce.upsert(&companies, &object_name, &external_id_field).await.map_err(err)
+    state.salesforce.upsert(&companies, &object_name, &external_id_field, &mapping).await.map_err(err)
+}
+
+#[tauri::command]
+async fn salesforce_job_status(state: State<'_, AppState>, job_id: String) -> Result<salesforce::SalesforceJobStatus, String> {
+    state.salesforce.job_status(&job_id).await.map_err(err)
+}
+
+#[tauri::command]
+async fn salesforce_retry_failed(state: State<'_, AppState>, job_id: String) -> Result<salesforce::SalesforceUpsertResult, String> {
+    state.salesforce.retry_failed(&job_id).await.map_err(err)
 }
 
 pub fn run() {
@@ -201,11 +264,36 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            bootstrap, data_status, search_companies, save_search, recent_searches, export_search_csv, add_to_list, add_search_to_list,
+            bootstrap, data_status, search_companies, save_search, recent_searches, export_search_csv, export_search_xlsx, add_to_list, add_search_to_list,
             codex_status, codex_login, codex_logout, codex_plan_search, codex_research_company,
+            collect_company_phone,
             duckdb_native_status, sync_duckdb_company_master, import_company_file, import_industry_taxonomy,
-            salesforce_status, salesforce_login_start, salesforce_upsert_list
+            salesforce_status, salesforce_login_start, salesforce_upsert_list, salesforce_job_status, salesforce_retry_failed
         ])
         .run(tauri::generate_context!())
         .expect("error while running CompanyMaster");
+}
+
+fn extract_phone(html: &str) -> Option<String> {
+    let tel_pattern = Regex::new(r"(?i)tel:\s*([+0-9０-９\s\-‐‑‒–—−ー()（）]{7,})").ok()?;
+    let visible_pattern = Regex::new(r"(?:\+81|0)[0-9０-９\s\-‐‑‒–—−ー()（）]{7,}[0-9０-９]").ok()?;
+    tel_pattern.find_iter(html).map(|m| m.as_str().to_string())
+        .chain(visible_pattern.find_iter(html).map(|m| m.as_str().to_string()))
+        .filter_map(|candidate| normalize_phone(&candidate))
+        .next()
+}
+
+fn normalize_phone(value: &str) -> Option<String> {
+    let mut normalized = String::new();
+    for ch in value.chars() {
+        let digit = match ch {
+            '０'..='９' => char::from_u32('0' as u32 + (ch as u32 - '０' as u32)),
+            '+' if normalized.is_empty() => Some('+'),
+            '0'..='9' => Some(ch),
+            _ => None,
+        };
+        if let Some(ch) = digit { normalized.push(ch); }
+    }
+    let digit_count = normalized.chars().filter(|ch| ch.is_ascii_digit()).count();
+    if (10..=15).contains(&digit_count) { Some(normalized) } else { None }
 }
