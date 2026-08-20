@@ -305,7 +305,7 @@ async fn fetch_username(client: &Client, instance_url: &str, token: &str) -> Res
 }
 
 fn build_csv(companies: &[Company], mapping: &[FieldMapping]) -> Result<Vec<u8>> {
-    let mut writer = csv::WriterBuilder::new().lineterminator(csv::Terminator::Any(b'\n')).from_writer(Vec::new());
+    let mut writer = csv::WriterBuilder::new().terminator(csv::Terminator::Any(b'\n')).from_writer(Vec::new());
     let headers: Vec<&str> = mapping.iter().map(|field| field.target.as_str()).collect();
     writer.write_record(&headers)?;
     for company in companies {

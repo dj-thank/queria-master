@@ -311,7 +311,9 @@ impl Db {
         let mut rows = stmt.query([])?;
 
         let mut workbook = rust_xlsxwriter::Workbook::new();
-        let worksheet = workbook.add_worksheet_with_constant_memory();
+        // Keep the workbook API compatible with the pinned rust_xlsxwriter release.
+        // The Excel row limit below still prevents an unbounded allocation.
+        let worksheet = workbook.add_worksheet();
         let headers = [
             "法人番号", "会社名", "都道府県", "市区町村", "住所", "法人種別", "業種コード", "業種名",
             "業種ソース", "AI推定業種コード", "AI推定業種名", "AI推定信頼度", "従業員数", "資本金",

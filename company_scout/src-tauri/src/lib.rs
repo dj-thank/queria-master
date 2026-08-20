@@ -112,7 +112,7 @@ async fn add_search_to_list(state: State<'_, AppState>, list_name: String, plan:
 }
 
 #[tauri::command]
-async fn codex_status(state: State<'_, AppState>) -> CodexStatus { state.codex.status().await }
+async fn codex_status(state: State<'_, AppState>) -> Result<CodexStatus, String> { Ok(state.codex.status().await) }
 
 #[tauri::command]
 async fn codex_login(state: State<'_, AppState>) -> Result<AuthUrl, String> {
@@ -199,7 +199,7 @@ async fn import_industry_taxonomy(state: State<'_, AppState>, path: String) -> R
 }
 
 #[tauri::command]
-async fn salesforce_status(state: State<'_, AppState>) -> SalesforceStatus { state.salesforce.status().await }
+async fn salesforce_status(state: State<'_, AppState>) -> Result<SalesforceStatus, String> { Ok(state.salesforce.status().await) }
 
 #[tauri::command]
 async fn salesforce_login_start(state: State<'_, AppState>, login_url: String, client_id: String) -> Result<salesforce::SalesforceLoginStart, String> {
@@ -277,10 +277,17 @@ pub fn run() {
 fn extract_phone(html: &str) -> Option<String> {
     let tel_pattern = Regex::new(r"(?i)tel:\s*([+0-9０-９\s\-‐‑‒–—−ー()（）]{7,})").ok()?;
     let visible_pattern = Regex::new(r"(?:\+81|0)[0-9０-９\s\-‐‑‒–—−ー()（）]{7,}[0-9０-９]").ok()?;
-    tel_pattern.find_iter(html).map(|m| m.as_str().to_string())
-        .chain(visible_pattern.find_iter(html).map(|m| m.as_str().to_string()))
-        .filter_map(|candidate| normalize_phone(&candidate))
-        .next()
+    for matched in tel_pattern.find_iter(html) {
+        if let Some(phone) = normalize_phone(matched.as_str()) {
+            return Some(phone);
+        }
+    }
+    for matched in visible_pattern.find_iter(html) {
+        if let Some(phone) = normalize_phone(matched.as_str()) {
+            return Some(phone);
+        }
+    }
+    None
 }
 
 fn normalize_phone(value: &str) -> Option<String> {
