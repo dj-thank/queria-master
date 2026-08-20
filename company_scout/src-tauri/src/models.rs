@@ -30,9 +30,14 @@ pub struct SearchPlan {
 
 fn default_limit() -> u32 { 30_000 }
 
+/// The bundled public snapshot currently contains 5.8M corporations. Keep
+/// the safety ceiling above that size so "全件抽出" does not silently stop at
+/// two million rows while still preventing an accidental unbounded request.
+pub const MAX_SEARCH_LIMIT: u32 = 10_000_000;
+
 impl SearchPlan {
     pub fn normalize(mut self) -> Self {
-        self.limit = self.limit.clamp(1, 2_000_000);
+        self.limit = self.limit.clamp(1, MAX_SEARCH_LIMIT);
         self.prefectures = clean(self.prefectures);
         self.cities = clean(self.cities);
         self.industry_codes = clean(self.industry_codes);
@@ -99,6 +104,12 @@ pub struct SearchResult {
 pub struct DataStatus {
     pub company_count: u64,
     pub taxonomy_count: u64,
+    pub industry_count: u64,
+    pub employee_count: u64,
+    pub capital_count: u64,
+    pub website_count: u64,
+    pub phone_count: u64,
+    pub address_count: u64,
     pub research_count: u64,
     pub db_path: String,
     pub duckdb_native: bool,

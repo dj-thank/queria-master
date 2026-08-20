@@ -52,12 +52,15 @@ const blankPlan: SearchPlan = {
 type View = "search" | "ai" | "research" | "connections";
 
 const fmt = new Intl.NumberFormat("ja-JP");
+const maxSearchLimit = 10_000_000;
 const splitValues = (value: string) => value.split(/[、,\n]/).map((v) => v.trim()).filter(Boolean);
 const optionalNumber = (value: string) => value.trim() === "" ? undefined : Number(value);
 const currentYear = new Date().getFullYear();
 const prefectures = ["北海道", "青森県", "岩手県", "宮城県", "秋田県", "山形県", "福島県", "茨城県", "栃木県", "群馬県", "埼玉県", "千葉県", "東京都", "神奈川県", "新潟県", "富山県", "石川県", "福井県", "山梨県", "長野県", "岐阜県", "静岡県", "愛知県", "三重県", "滋賀県", "京都府", "大阪府", "兵庫県", "奈良県", "和歌山県", "鳥取県", "島根県", "岡山県", "広島県", "山口県", "徳島県", "香川県", "愛媛県", "高知県", "福岡県", "佐賀県", "長崎県", "熊本県", "大分県", "宮崎県", "鹿児島県", "沖縄県"];
 const industryPresets: Array<{ label: string; codes: string[]; terms: string[] }> = [
-  { label: "情報通信業", codes: ["37", "38", "39", "40", "41"], terms: [] },
+  // The official JSIC major code is the letter G. The middle codes below are
+  // G37..G41 in the raw Queria path; numeric input remains accepted by Rust.
+  { label: "情報通信業（G）", codes: ["G"], terms: [] },
   { label: "製造業", codes: [], terms: ["製造"] },
   { label: "建設・土木", codes: [], terms: ["建設"] },
   { label: "卸売・小売", codes: [], terms: ["販売"] },
@@ -67,11 +70,11 @@ const industryPresets: Array<{ label: string; codes: string[]; terms: string[] }
   { label: "運輸・物流", codes: [], terms: ["運輸"] },
 ];
 const industryMiddle = [
-  { code: "37", label: "通信業" },
-  { code: "38", label: "放送業" },
-  { code: "39", label: "情報サービス業" },
-  { code: "40", label: "インターネット附随サービス業" },
-  { code: "41", label: "映像・音声・文字情報制作業" },
+  { code: "G37", displayCode: "37", label: "通信業" },
+  { code: "G38", displayCode: "38", label: "放送業" },
+  { code: "G39", displayCode: "39", label: "情報サービス業" },
+  { code: "G40", displayCode: "40", label: "インターネット附随サービス業" },
+  { code: "G41", displayCode: "41", label: "映像・音声・文字情報制作業" },
 ];
 const companyKinds = ["株式会社", "有限会社", "合同会社", "合資会社", "合名会社", "医療法人", "学校法人", "社会福祉法人", "NPO法人"];
 const employeeRanges = [
@@ -140,7 +143,7 @@ function App() {
     plan.prefectures.forEach((v) => out.push(v));
     plan.cities.forEach((v) => out.push(v));
     plan.industry_terms.forEach((v) => out.push(v));
-    plan.industry_codes.forEach((v) => out.push(`業種 ${v}`));
+    plan.industry_codes.forEach((v) => out.push(`業種 ${v.match(/^G(\d+)$/)?.[1] ?? v}`));
     if (plan.min_employees != null || plan.max_employees != null)
       out.push(`従業員 ${plan.min_employees ?? 0}〜${plan.max_employees ?? "∞"}`);
     if (plan.min_capital != null || plan.max_capital != null)
@@ -164,6 +167,7 @@ function App() {
         api.recentSearches(12),
       ]);
       if (d.status === "fulfilled") setData(d.value);
+      if (d.status === "rejected") setMessage(`データ状態を取得できませんでした: ${String(d.reason)}`);
       if (c.status === "fulfilled") setCodex(c.value);
       if (sf.status === "fulfilled") setSalesforce(sf.value);
       if (memories.status === "fulfilled") setSavedSearches(memories.value);
@@ -440,8 +444,9 @@ function App() {
         </nav>
         <div className="sidebar-stats">
           <div><span>企業</span><strong>{data ? fmt.format(data.company_count) : "-"}</strong></div>
-          <div><span>業種分類</span><strong>{data ? fmt.format(data.taxonomy_count) : "-"}</strong></div>
+          <div><span>業種収録</span><strong>{data ? fmt.format(data.industry_count) : "-"}</strong></div>
           <div><span>調査メモ</span><strong>{data ? fmt.format(data.research_count) : "-"}</strong></div>
+          {data && <small className="coverage-note">入力状況　住所 {fmt.format(data.address_count)}<br />従業員 {fmt.format(data.employee_count)}　Web {fmt.format(data.website_count)}<br />電話 {fmt.format(data.phone_count)}（公式公開データ内）</small>}
         </div>
         <div className="model-lock"><Sparkles size={14} /><div><span>LLM固定</span><strong>GPT-5.6 Luna</strong></div></div>
       </aside>
@@ -500,7 +505,7 @@ function App() {
                   </div>
                   <div className="subsection-label">情報通信業の中分類（JSICコード）</div>
                   <div className="option-grid middle-options">
-                    {industryMiddle.map((item) => <button key={item.code} className={`option-pill ${plan.industry_codes.includes(item.code) ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, industry_codes: toggleValue(p.industry_codes, item.code) }))}><b>{item.code}</b>{item.label}</button>)}
+                    {industryMiddle.map((item) => <button key={item.code} className={`option-pill ${plan.industry_codes.includes(item.code) ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, industry_codes: toggleValue(p.industry_codes, item.code) }))}><b>{item.displayCode}</b>{item.label}</button>)}
                   </div>
                   <div className="condition-input-row two"><label><span>業種コード（小分類・細分類も可）</span><input value={plan.industry_codes.filter((code) => !industryMiddle.some((item) => item.code === code)).join(", ")} onChange={(e) => setPlan((p) => ({ ...p, industry_codes: [...industryMiddle.map((item) => item.code).filter((code) => p.industry_codes.includes(code)), ...splitValues(e.target.value)] }))} placeholder="例: 391 / 3911" /></label><label><span>業種キーワード</span><input value={plan.industry_terms.join(", ")} onChange={(e) => setPlan((p) => ({ ...p, industry_terms: splitValues(e.target.value) }))} placeholder="SaaS、食品製造" /></label></div>
                 </div>}
@@ -520,7 +525,7 @@ function App() {
 
                 {fieldCategory === "keywords" && <div className="condition-section compact-section">
                   <div className="condition-input-row two"><label><span>キーワード（いずれかを含む）</span><input value={plan.keyword_any.join(", ")} onChange={(e) => setPlan((p) => ({ ...p, keyword_any: splitValues(e.target.value) }))} placeholder="SaaS、クラウド、食品" /></label><label><span>キーワード（すべてを含む）</span><input value={plan.keyword_all.join(", ")} onChange={(e) => setPlan((p) => ({ ...p, keyword_all: splitValues(e.target.value) }))} placeholder="自社開発、法人向け" /></label></div>
-                  <div className="condition-input-row limit-row"><label><span>最大抽出件数</span><input type="number" min={1} max={2000000} value={plan.limit} onChange={(e) => setPlan((p) => ({ ...p, limit: Math.max(1, Math.min(2000000, Number(e.target.value) || 1)) }))} /></label><span className="condition-help">業種コードは前方一致。公式業種とAI推定は結果画面で区別して表示します。</span></div>
+                  <div className="condition-input-row limit-row"><label><span>最大抽出件数</span><input type="number" min={1} max={maxSearchLimit} value={plan.limit} onChange={(e) => setPlan((p) => ({ ...p, limit: Math.max(1, Math.min(maxSearchLimit, Number(e.target.value) || 1)) }))} /></label><span className="condition-help">全件抽出は現在の全量スナップショット（最大1,000万社）まで取得します。業種コードは公式JSIC形式で判定します。</span></div>
                 </div>}
                 <div className="condition-actions"><span>{filters.length ? `${filters.length}個の条件を選択中` : "条件なし（全国・全業種）"}</span><button className="primary" onClick={() => runSearch(1)} disabled={!!busy}><Search size={15} />この条件で検索</button></div>
               </div>
@@ -534,7 +539,7 @@ function App() {
               <div className="toolbar-actions">
                 <input value={listName} onChange={(e) => setListName(e.target.value)} className="list-name" aria-label="リスト名" />
                 <button className="ghost" onClick={() => void extractWithLimit(30000)} disabled={!!busy}><Search size={15} />30,000件抽出</button>
-                <button className="ghost" onClick={() => void extractWithLimit(2000000)} disabled={!!busy}><Search size={15} />全件抽出</button>
+                <button className="ghost" onClick={() => void extractWithLimit(maxSearchLimit)} disabled={!!busy}><Search size={15} />全件抽出</button>
                 <button className="ghost" onClick={addSearchResultsToList} disabled={!result?.rows.length || !!busy}><ListPlus size={15} />検索結果をリストへ</button>
                 <button className="ghost" onClick={exportCsv} disabled={!result || !!busy}><Download size={15} />CSV</button>
                 <button className="ghost" onClick={exportXlsx} disabled={!result || !!busy}><Download size={15} />Excel</button>

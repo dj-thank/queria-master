@@ -175,12 +175,52 @@ impl Db {
 
     pub fn status(&self, duckdb_version: Option<String>) -> Result<DataStatus> {
         let conn = self.connect()?;
-        let company_count: i64 = conn.query_row("SELECT count(*) FROM companies", [], |r| r.get(0))?;
+        let company_count: i64 = if self.runtime_path.is_some() {
+            conn.query_row("SELECT count(*) FROM queria_runtime.core.companies", [], |r| r.get(0))?
+        } else {
+            conn.query_row("SELECT count(*) FROM companies", [], |r| r.get(0))?
+        };
         let taxonomy_count: i64 = conn.query_row("SELECT count(*) FROM industry_taxonomy", [], |r| r.get(0))?;
+        // Do not scan the aggregate search view just to paint the sidebar.
+        // The source tables provide the same coverage figures much faster and
+        // avoid delaying bootstrap on a 5.8M-row snapshot.
+        let coverage: (i64, i64, i64, i64, i64, i64) = if self.runtime_path.is_some() {
+            conn.query_row(
+                "SELECT
+                   (SELECT count(DISTINCT corporate_number) FROM queria_runtime.core.company_industries),
+                   count(*) FILTER (WHERE employee_number IS NOT NULL),
+                   count(*) FILTER (WHERE capital_stock IS NOT NULL),
+                   count(*) FILTER (WHERE nullif(trim(company_url), '') IS NOT NULL),
+                   (SELECT count(*) FROM queria_runtime.search.company_documents WHERE nullif(trim(phone), '') IS NOT NULL),
+                   count(*) FILTER (WHERE nullif(trim(full_address), '') IS NOT NULL)
+                 FROM queria_runtime.core.companies",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )?
+        } else {
+            conn.query_row(
+                "SELECT
+                   count(*) FILTER (WHERE nullif(trim(industry_code), '') IS NOT NULL),
+                   count(*) FILTER (WHERE employees IS NOT NULL),
+                   count(*) FILTER (WHERE capital IS NOT NULL),
+                   count(*) FILTER (WHERE nullif(trim(website), '') IS NOT NULL),
+                   count(*) FILTER (WHERE nullif(trim(phone), '') IS NOT NULL),
+                   count(*) FILTER (WHERE nullif(trim(address), '') IS NOT NULL)
+                 FROM companies",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )?
+        };
         let research_count: i64 = conn.query_row("SELECT count(*) FROM research_reports", [], |r| r.get(0))?;
         Ok(DataStatus {
             company_count: company_count.max(0) as u64,
             taxonomy_count: taxonomy_count.max(0) as u64,
+            industry_count: coverage.0.max(0) as u64,
+            employee_count: coverage.1.max(0) as u64,
+            capital_count: coverage.2.max(0) as u64,
+            website_count: coverage.3.max(0) as u64,
+            phone_count: coverage.4.max(0) as u64,
+            address_count: coverage.5.max(0) as u64,
             research_count: research_count.max(0) as u64,
             db_path: self.path.display().to_string(),
             duckdb_native: true,
@@ -566,31 +606,51 @@ fn ensure_runtime_view(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
         CREATE OR REPLACE VIEW companies AS
+        WITH industry_agg AS (
+          -- The one-row-per-company core snapshot only carries JSIC for a
+          -- small subset. company_industries is the normalized official
+          -- relation and contains the additional 149k classified companies.
+          SELECT
+            corporate_number,
+            string_agg(DISTINCT nullif(jsic_code, ''), '|') AS codes,
+            string_agg(DISTINCT nullif(jsic_major_name, ''), ' / ') AS major_names,
+            string_agg(DISTINCT nullif(jsic_middle_name, ''), ' / ') AS middle_names,
+            string_agg(DISTINCT nullif(jsic_small_name, ''), ' / ') AS small_names
+          FROM queria_runtime.core.company_industries
+          WHERE corporate_number IS NOT NULL
+          GROUP BY corporate_number
+        )
         SELECT
           base.corporate_number,
           base.company_name AS name,
-          base.prefecture_name AS prefecture,
-          base.city_name AS city,
-          base.full_address AS address,
+          coalesce(nullif(base.prefecture_name, ''), contacts.resolved_prefecture_name) AS prefecture,
+          coalesce(nullif(base.city_name, ''), contacts.resolved_city_name) AS city,
+          coalesce(nullif(base.full_address, ''), contacts.resolved_address) AS address,
           base.corporate_kind_code AS kind,
           concat_ws('|',
             nullif(base.jsic_major_code, ''),
             nullif(base.jsic_middle_codes, ''),
-            nullif(base.jsic_codes_all_raw, '')
+            nullif(base.jsic_codes_all_raw, ''),
+            nullif(industry_agg.codes, '')
           ) AS industry_code,
-          base.jsic_major_name AS industry_name,
-          'queria_runtime' AS industry_source,
+          nullif(concat_ws(' / ',
+            nullif(base.jsic_major_name, ''),
+            nullif(industry_agg.major_names, ''),
+            nullif(industry_agg.middle_names, ''),
+            nullif(industry_agg.small_names, '')
+          ), '') AS industry_name,
+          CASE WHEN industry_agg.codes IS NOT NULL THEN 'queria_runtime/jsic' ELSE 'queria_runtime' END AS industry_source,
           NULL::VARCHAR AS inferred_industry_code,
           NULL::VARCHAR AS inferred_industry_name,
           NULL::DOUBLE AS inferred_industry_confidence,
-          try_cast(base.employee_number AS BIGINT) AS employees,
-          try_cast(base.capital_stock AS BIGINT) AS capital,
-          try_cast(base.founding_year AS INTEGER) AS established_year,
-          base.company_url AS website,
+          coalesce(try_cast(base.employee_number AS BIGINT), try_cast(contacts.employee_number AS BIGINT)) AS employees,
+          coalesce(try_cast(base.capital_stock AS BIGINT), try_cast(contacts.capital_stock AS BIGINT)) AS capital,
+          coalesce(try_cast(base.founding_year AS INTEGER), try_cast(contacts.founding_year AS INTEGER)) AS established_year,
+          coalesce(nullif(base.company_url, ''), nullif(contacts.effective_company_url, ''), nullif(contacts.company_url, '')) AS website,
           coalesce(local_contacts.phone, contacts.phone) AS phone,
-          base.representative_name AS representative,
-          base.business_summary,
-          base.business_items_raw AS business_items,
+          coalesce(nullif(base.representative_name, ''), contacts.representative_name) AS representative,
+          coalesce(nullif(base.business_summary, ''), contacts.business_summary) AS business_summary,
+          coalesce(nullif(base.business_items_raw, ''), contacts.business_items_raw) AS business_items,
           base.subsidy_count,
           base.subsidy_total_amount,
           base.procurement_count,
@@ -603,6 +663,8 @@ fn ensure_runtime_view(conn: &Connection) -> Result<()> {
           try_cast(base.latest_net_assets AS DOUBLE) AS latest_net_assets,
           CAST(base.extracted_at AS VARCHAR) AS source_updated_at
         FROM queria_runtime.core.companies AS base
+        LEFT JOIN industry_agg
+          ON industry_agg.corporate_number = base.corporate_number
         LEFT JOIN queria_runtime.search.company_documents AS contacts
           ON contacts.corporate_number = base.corporate_number
         LEFT JOIN company_contact_overrides AS local_contacts
@@ -642,10 +704,17 @@ fn build_where(plan: &SearchPlan) -> String {
     if !plan.industry_codes.is_empty() {
         let terms: Vec<String> = plan.industry_codes.iter().map(|x| {
             let q = escape_like(x);
-            format!("(c.industry_code LIKE {} ESCAPE '\\' OR c.industry_code LIKE {} ESCAPE '\\' OR c.industry_code LIKE {} ESCAPE '\\' OR c.inferred_industry_code LIKE {} ESCAPE '\\' OR c.business_items LIKE {} ESCAPE '\\')",
+            let numeric_major_variant = if x.chars().all(|ch| ch.is_ascii_digit()) {
+                let prefixed = escape_like(&format!("G{}", x));
+                format!(" OR c.industry_code ILIKE {} ESCAPE '\\' OR c.industry_code ILIKE {} ESCAPE '\\'",
+                    sql_quote(&format!("%{}%", prefixed)),
+                    sql_quote(&format!("%|{}%", prefixed)))
+            } else { String::new() };
+            format!("(c.industry_code ILIKE {} ESCAPE '\\' OR c.industry_code ILIKE {} ESCAPE '\\' OR c.industry_code ILIKE {} ESCAPE '\\'{} OR c.inferred_industry_code ILIKE {} ESCAPE '\\' OR c.business_items ILIKE {} ESCAPE '\\')",
                 sql_quote(&format!("{}%", q)),
                 sql_quote(&format!("%|{}%", q)),
                 sql_quote(&format!("%{}%", q)),
+                numeric_major_variant,
                 sql_quote(&format!("{}%", q)),
                 sql_quote(&format!("%{}%", q)))
         }).collect();

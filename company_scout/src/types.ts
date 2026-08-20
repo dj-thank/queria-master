@@ -86,6 +86,12 @@ export type ResearchReport = {
 export type DataStatus = {
   company_count: number;
   taxonomy_count: number;
+  industry_count: number;
+  employee_count: number;
+  capital_count: number;
+  website_count: number;
+  phone_count: number;
+  address_count: number;
   research_count: number;
   db_path: string;
   duckdb_native: boolean;

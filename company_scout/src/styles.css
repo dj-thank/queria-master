@@ -22,6 +22,7 @@ nav button:hover, nav button.active { color: white; background: #1f2937; }
 .sidebar-stats div { display: flex; align-items: center; justify-content: space-between; }
 .sidebar-stats span { color: #8791a3; font-size: 11px; }
 .sidebar-stats strong { font-size: 12px; font-variant-numeric: tabular-nums; }
+.coverage-note { color: #748094; font-size: 10px; line-height: 1.65; padding: 2px 1px 0; }
 .model-lock { margin-top: auto; display: flex; gap: 8px; align-items: center; color: #d1d5db; border-top: 1px solid #263142; padding: 14px 6px 0; }
 .model-lock span, .model-lock strong { display: block; font-size: 10px; }
 .model-lock strong { color: white; margin-top: 1px; }

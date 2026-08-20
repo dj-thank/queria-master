@@ -180,7 +180,7 @@ impl CodexManager {
 - 4桁などの業種コードに自信がない場合は、コードを捏造せずindustry_termsへ日本語キーワードを入れる。
 - 「ITっぽい」「こういう会社」のような曖昧条件はindustry_terms/keyword_anyへ分解する。
 - website_requiredは明示された場合のみ設定する。
-- 件数指定がなければlimit=30000。最大2000000。
+- 件数指定がなければlimit=30000。最大10000000（現在の全量スナップショットを上限で切らない）。
 - textには元の要望を短く残す。
 - 値が不明な条件は無理に補わない。
 
@@ -421,7 +421,7 @@ fn search_plan_schema() -> Value {
         "website_required":{"type":["boolean","null"]},
         "keyword_any":{"type":"array","items":{"type":"string"}},
         "keyword_all":{"type":"array","items":{"type":"string"}},
-        "limit":{"type":"integer","minimum":1,"maximum":2000000}
+        "limit":{"type":"integer","minimum":1,"maximum":10000000}
       },
       "required":["text","prefectures","cities","industry_codes","industry_terms","company_kinds","min_employees","max_employees","min_capital","max_capital","established_from","established_to","website_required","keyword_any","keyword_all","limit"],
       "additionalProperties":false
