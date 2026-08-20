@@ -124,10 +124,19 @@ def test_companion_layer_is_resumable_and_does_not_change_canonical(tmp_path: Pa
             "source_key": "official_site_html",
             "source_url": "https://example.jp/company",
         },
+        {
+            "kind": "contact",
+            "corporate_number": "9876543210987",
+            "contact_type": "phone",
+            "value": "06-9999-0000",
+            "source_key": "public_candidate",
+            "source_url": "https://candidate.example.jp",
+            "sales_eligibility": "review",
+        },
     ]
     first_import = import_enrichment_records(canonical, records, enrichment_path=enrichment)
     second_import = import_enrichment_records(canonical, records[:2], enrichment_path=enrichment)
-    assert first_import == {"contact": 3, "location": 1}
+    assert first_import == {"contact": 4, "location": 1}
     assert second_import == {"contact": 2}
 
     columns, rows = export_sales_ready_accounts(canonical, enrichment_path=enrichment)
@@ -138,11 +147,18 @@ def test_companion_layer_is_resumable_and_does_not_change_canonical(tmp_path: Pa
     assert account["email"] == "info@example.jp"
     assert account["address"] == "東京都千代田区1-1"
 
+    canonical_sql = str(canonical).replace("'", "''")
     con = duckdb.connect(str(enrichment), read_only=True)
     try:
-        assert con.execute("SELECT count(*) FROM enrichment.enrichment.company_contact_points").fetchone()[0] == 3
-        assert con.execute("SELECT count(*) FROM enrichment.enrichment.evidence_documents").fetchone()[0] == 7
+        con.execute(f"ATTACH '{canonical_sql}' AS canonical (READ_ONLY)")
+        assert con.execute("SELECT count(*) FROM enrichment.enrichment.company_contact_points").fetchone()[0] == 4
+        assert con.execute("SELECT count(*) FROM enrichment.enrichment.evidence_documents").fetchone()[0] == 8
+        assert con.execute(
+            "SELECT sales_state FROM enrichment.crm.v_enrichment_coverage "
+            "WHERE corporate_number = '9876543210987'"
+        ).fetchone()[0] != "ready"
     finally:
+        con.execute("DETACH canonical")
         con.close()
 
     suppression = {

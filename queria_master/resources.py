@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -8,10 +9,29 @@ SOURCE_ROOT = PACKAGE_ROOT.parent
 SOURCE_LAYOUT = (SOURCE_ROOT / "sql" / "remote").is_dir() and (SOURCE_ROOT / "reference").is_dir()
 ASSET_ROOT = SOURCE_ROOT if SOURCE_LAYOUT else PACKAGE_ROOT / "assets"
 
-# In a source ZIP, keep data beside the project. When installed as a package,
-# use the current directory unless QUERIA_MASTER_HOME explicitly overrides it.
-_default_home = SOURCE_ROOT if SOURCE_LAYOUT else Path.cwd()
-PROJECT_ROOT = Path(os.environ.get("QUERIA_MASTER_HOME", str(_default_home))).expanduser().resolve()
+def discover_project_root() -> Path:
+    """Resolve a stable app home for source, installed and frozen layouts."""
+
+    override = os.environ.get("QUERIA_MASTER_HOME")
+    if override:
+        return Path(override).expanduser().resolve()
+    if getattr(sys, "frozen", False):
+        executable_dir = Path(sys.executable).resolve().parent
+        for candidate in (executable_dir, executable_dir.parent):
+            data_dir = candidate / "data"
+            if (data_dir / "queria_runtime.duckdb").is_file() or (
+                data_dir / "queria_master.duckdb"
+            ).is_file():
+                return candidate
+        # A frozen executable must not silently bind to an unrelated database
+        # merely because it was started from that directory.
+        return executable_dir
+    if SOURCE_LAYOUT:
+        return SOURCE_ROOT.resolve()
+    return Path.cwd().resolve()
+
+
+PROJECT_ROOT = discover_project_root()
 SQL_ROOT = ASSET_ROOT / "sql"
 REFERENCE_ROOT = ASSET_ROOT / "reference"
 DEFAULT_DB = PROJECT_ROOT / "data" / "queria_master.duckdb"

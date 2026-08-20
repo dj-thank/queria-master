@@ -5,11 +5,16 @@ import hashlib
 import os
 import shutil
 import stat
+import sys
 import zipfile
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from queria_master.audit import audit_database
+
 DEFAULT_README = ROOT / "docs" / "FULL_APP_BUNDLE_README_JA.md"
 
 
@@ -70,6 +75,28 @@ def _required_data(data_dir: Path) -> list[Path]:
     return files
 
 
+def _preflight_data(data_dir: Path) -> dict[str, object]:
+    """Reject a release whose canonical/runtime/index set is inconsistent."""
+
+    report = audit_database(
+        data_dir / "queria_master.duckdb",
+        search_index_path=data_dir / "search.sqlite",
+        enrichment_path=data_dir / "queria_enrichment.duckdb",
+        runtime_path=data_dir / "queria_runtime.duckdb",
+    )
+    if report.get("overall_status") != "passed":
+        failed = [name for name, passed in report.get("gates", {}).items() if not passed]
+        raise SystemExit("配布データのstrict auditに失敗しました: " + ", ".join(failed))
+    runtime_manifest = (report.get("runtime") or {}).get("manifest") or {}
+    generation_id = runtime_manifest.get("generation_id")
+    index_generation = (report.get("search_index") or {}).get("runtime_generation_id")
+    if not generation_id:
+        raise SystemExit("Runtime DBにgeneration_idがありません。build-runtimeを再実行してください。")
+    if index_generation != generation_id:
+        raise SystemExit("Runtime DBと検索索引のgeneration_idが一致しません。")
+    return report
+
+
 def build_bundle(
     *,
     output: Path,
@@ -80,6 +107,7 @@ def build_bundle(
     readme: Path,
 ) -> tuple[int, str, int]:
     data_files = _required_data(data_dir)
+    _preflight_data(data_dir)
     entries: list[tuple[Path, str]] = [(readme, "README_JA.md")]
     for folder_name, folder in (
         ("queria-master-desktop", desktop_dir),

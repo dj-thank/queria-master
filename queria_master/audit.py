@@ -125,6 +125,7 @@ def _search_report(path: Path, canonical_path: Path, expected_rows: int) -> dict
                 "row_count": row_count,
                 "expected_company_count": expected_rows,
                 "refresh_id": index.metadata.get("refresh_id", ""),
+                "runtime_generation_id": index.metadata.get("runtime_generation_id", ""),
                 "keyword_search_ms": {
                     "median": round(statistics.median(timings), 3),
                     "min": round(min(timings), 3),
@@ -176,7 +177,13 @@ def audit_database(
     database_path = Path(database_path).resolve()
     canonical = _canonical_report(database_path)
     expected_rows = int(canonical["company_count"])
-    search = _search_report(Path(search_index_path).resolve(), database_path, expected_rows)
+    runtime_database_path = None if runtime_path is None else Path(runtime_path).resolve()
+    # The release search index is built from the integrated runtime database,
+    # not from the canonical refresh input.  Validate the same artifact pair
+    # used by search/daemon; fall back to canonical only when runtime auditing
+    # is explicitly disabled.
+    search_database_path = runtime_database_path or database_path
+    search = _search_report(Path(search_index_path).resolve(), search_database_path, expected_rows)
     enrichment = None
     if enrichment_path is not None:
         enrichment = _optional_db_counts(
@@ -186,11 +193,12 @@ def audit_database(
                 ("evidence_documents", "enrichment.evidence_documents"),
                 ("websites", "enrichment.company_websites"),
                 ("contact_points", "enrichment.company_contact_points"),
+                ("establishments", "enrichment.company_establishments"),
                 ("locations", "enrichment.company_locations"),
                 ("suppressions", "compliance.suppressions"),
             ),
         )
-    runtime = None if runtime_path is None else _runtime_report(Path(runtime_path).resolve(), expected_rows)
+    runtime = None if runtime_database_path is None else _runtime_report(runtime_database_path, expected_rows)
     gates = {
         "canonical_has_companies": expected_rows > 0,
         "corporate_numbers_unique": canonical["duplicate_corporate_number_rows"] == 0,

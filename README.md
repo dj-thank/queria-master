@@ -1,5 +1,25 @@
 # Queria Master — 全法人・Queria公開データを DuckDB へ
 
+## 0.9: 設定と実装の生存性
+
+0.9ではcanonical DB、enrichment DB、runtime DB、検索索引を別の役割として解決します。検索系はruntime、更新系はcanonicalを既定にし、runtime/indexは`generation_id`が一致する場合だけ開きます。
+
+```powershell
+# 保存設定を表示
+.\.venv\Scripts\python.exe -m queria_master configure
+
+# portableホームを保存
+.\.venv\Scripts\python.exe -m queria_master configure --home D:\Queria --default-limit 500
+
+# 現在のDB・索引・機能可否
+.\.venv\Scripts\python.exe -m queria_master app-health
+
+# 同梱済み公開データから法人番号付き事業所連絡先を別スコープで同期
+.\.venv\Scripts\python.exe -m queria_master sync-embedded-public
+```
+
+Desktop版には［設定・診断］を追加しました。DB/index不整合時も設定画面を開け、検証後に保存・即時反映できます。詳細は `docs/V090_OPERATIONAL_ARCHITECTURE_JA.md` を参照してください。
+
 Queria が公開する **国税庁法人番号・gBizINFO・EDINET・厚生労働省・政府電子調達・東京都ODS** の
 24テーブルを法人番号で結合し、全法人の統合マスタと、補助金・調達・特許・財務ファクト・提出書類・
 介護/障害福祉事業所などの明細をローカル DuckDB に取り込む実動プロジェクトです。法人番号のない

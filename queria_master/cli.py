@@ -3,21 +3,27 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
+from dataclasses import asdict, replace
 from pathlib import Path
 
+from .app_config import AppSettings, SettingsError, default_settings_path, load_settings, resolve_artifacts, save_settings
 from .audit import AuditError, DEFAULT_AUDIT_OUTPUT, audit_database
 from .enrichment import (
     DEFAULT_ENRICHMENT_DB,
     EnrichmentError,
     claim_enrichment_tasks,
     complete_enrichment_task,
+    export_establishment_contacts,
     export_sales_ready_accounts,
     import_enrichment_jsonl,
     initialize_database as initialize_enrichment_database,
     seed_enrichment,
+    sync_embedded_public_enrichment,
 )
 from .enrichment_worker import run_enrichment_worker
+from .health import inspect_application
 from .pipeline import PipelineError, online_probe, refresh, version_report
 from .query import run_local_sql, search_companies, semantic_search_companies, show_summary
 from .resident import run_jsonl_protocol
@@ -41,7 +47,13 @@ def _parser() -> argparse.ArgumentParser:
         prog="queria-master",
         description="Queria の公開法人データをローカル DuckDB へ取り込む",
     )
-    parser.add_argument("--db", type=_path, default=DEFAULT_DB, help="DuckDB ファイル")
+    parser.add_argument(
+        "--db",
+        type=_path,
+        default=None,
+        help="DuckDB ファイル（省略時は検索系がruntime DB、更新系がcanonical DB）",
+    )
+    parser.add_argument("--settings", type=_path, help="保存設定JSON（省略時はアプリホーム/config配下）")
     sub = parser.add_subparsers(dest="command", required=True)
 
     refresh_parser = sub.add_parser("refresh", help="Queria から抽出して DuckDB を再構築")
@@ -63,6 +75,7 @@ def _parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--city")
     search_parser.add_argument("--industry-major", action="append", default=[], help="JSIC大分類 A〜T（複数指定可）")
     search_parser.add_argument("--industry-middle", action="append", default=[])
+    search_parser.add_argument("--corporate-kind", action="append", default=[], help="法人種別コード（複数指定可）")
     search_parser.add_argument("--min-employees", type=int)
     search_parser.add_argument("--max-employees", type=int)
     search_parser.add_argument("--min-capital", type=int)
@@ -70,7 +83,7 @@ def _parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--has-web", action="store_true")
     search_parser.add_argument("--limit", type=int, default=100)
     search_parser.add_argument("--out", type=_path)
-    search_parser.add_argument("--search-index", type=_path, default=DEFAULT_SEARCH_INDEX)
+    search_parser.add_argument("--search-index", type=_path)
     search_parser.add_argument("--no-search-index", action="store_true", help="SQLite FTS高速索引を使わない")
     search_parser.add_argument("--fast", action="store_true", help="安定ソートを省略し、0.1秒級の応答を優先")
 
@@ -78,7 +91,7 @@ def _parser() -> argparse.ArgumentParser:
         "daemon",
         help="検索索引を常駐させるJSONLプロトコル（プロセス起動を繰り返さない高速経路）",
     )
-    daemon_parser.add_argument("--search-index", type=_path, default=DEFAULT_SEARCH_INDEX)
+    daemon_parser.add_argument("--search-index", type=_path)
     daemon_parser.add_argument(
         "--no-index-validation",
         action="store_true",
@@ -86,25 +99,25 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     index_parser = sub.add_parser("build-search-index", help="法人キーワード検索用のSQLite FTS索引を構築")
-    index_parser.add_argument("--out", type=_path, default=DEFAULT_SEARCH_INDEX)
+    index_parser.add_argument("--out", type=_path)
     index_parser.add_argument("--batch-size", type=int, default=20_000)
 
     runtime_parser = sub.add_parser(
         "build-runtime",
         help="法人マスタと証拠付き拡張DBを一つの高速読み取り用DuckDBへ統合",
     )
-    runtime_parser.add_argument("--enrichment-db", type=_path, default=DEFAULT_ENRICHMENT_DB)
-    runtime_parser.add_argument("--out", type=_path, default=DEFAULT_RUNTIME_DB)
+    runtime_parser.add_argument("--enrichment-db", type=_path)
+    runtime_parser.add_argument("--out", type=_path)
     runtime_parser.add_argument("--threads", type=int, default=4)
     runtime_parser.add_argument("--memory-limit", default="8GB")
 
     runtime_summary_parser = sub.add_parser("runtime-summary", help="統合ランタイムDBの件数と収録状態を表示")
-    runtime_summary_parser.add_argument("--runtime-db", type=_path, default=DEFAULT_RUNTIME_DB)
+    runtime_summary_parser.add_argument("--runtime-db", type=_path)
 
     audit_parser = sub.add_parser("audit", help="法人DB・拡張DB・検索索引・統合DBを読み取り専用で監査")
-    audit_parser.add_argument("--search-index", type=_path, default=DEFAULT_SEARCH_INDEX)
-    audit_parser.add_argument("--enrichment-db", type=_path, default=DEFAULT_ENRICHMENT_DB)
-    audit_parser.add_argument("--runtime-db", type=_path, default=DEFAULT_RUNTIME_DB)
+    audit_parser.add_argument("--search-index", type=_path)
+    audit_parser.add_argument("--enrichment-db", type=_path)
+    audit_parser.add_argument("--runtime-db", type=_path)
     audit_parser.add_argument("--out", type=_path, default=DEFAULT_AUDIT_OUTPUT)
     audit_parser.add_argument("--no-runtime", action="store_true", help="統合ランタイムDBを監査しない")
     audit_parser.add_argument("--strict", action="store_true", help="ゲート失敗時に終了コード1を返す")
@@ -113,7 +126,7 @@ def _parser() -> argparse.ArgumentParser:
         "build-semantic-index", help="任意の埋め込みモデルで text-rich 法人のベクトル索引を構築"
     )
     semantic_build_parser.add_argument("--model", required=True, help="SentenceTransformersモデル名またはローカルパス")
-    semantic_build_parser.add_argument("--search-index", type=_path, default=DEFAULT_SEARCH_INDEX)
+    semantic_build_parser.add_argument("--search-index", type=_path)
     semantic_build_parser.add_argument("--out", type=_path, default=DEFAULT_SEMANTIC_INDEX)
     semantic_build_parser.add_argument("--batch-size", type=int, default=256)
     semantic_build_parser.add_argument("--dtype", choices=("float16", "float32"), default="float16")
@@ -123,7 +136,7 @@ def _parser() -> argparse.ArgumentParser:
     semantic_search_parser = sub.add_parser("semantic-search", help="任意の埋め込みモデルで意味検索")
     semantic_search_parser.add_argument("query", help="自然文の検索文")
     semantic_search_parser.add_argument("--model", help="SentenceTransformersモデル名。省略時は索引の記録値")
-    semantic_search_parser.add_argument("--search-index", type=_path, default=DEFAULT_SEARCH_INDEX)
+    semantic_search_parser.add_argument("--search-index", type=_path)
     semantic_search_parser.add_argument("--semantic-index", type=_path, default=DEFAULT_SEMANTIC_INDEX)
     semantic_search_parser.add_argument("--candidate-keyword", help="先にFTSで候補を絞る語")
     semantic_search_parser.add_argument("--prefecture")
@@ -150,20 +163,20 @@ def _parser() -> argparse.ArgumentParser:
     init_enrichment_parser = sub.add_parser(
         "init-enrichment", help="正規法人DBを変更せず、証拠付き拡張DBを初期化"
     )
-    init_enrichment_parser.add_argument("--enrichment-db", type=_path, default=DEFAULT_ENRICHMENT_DB)
+    init_enrichment_parser.add_argument("--enrichment-db", type=_path)
 
     seed_parser = sub.add_parser("seed-enrichment", help="全法人分の再開可能な拡張タスクを作成")
-    seed_parser.add_argument("--enrichment-db", type=_path, default=DEFAULT_ENRICHMENT_DB)
+    seed_parser.add_argument("--enrichment-db", type=_path)
     seed_parser.add_argument("--limit", type=int)
     seed_parser.add_argument("--source-key", default="official_site")
 
     import_enrichment_parser = sub.add_parser("import-enrichment", help="抽出器のJSONLを証拠付きで取り込む")
-    import_enrichment_parser.add_argument("--enrichment-db", type=_path, default=DEFAULT_ENRICHMENT_DB)
+    import_enrichment_parser.add_argument("--enrichment-db", type=_path)
     import_enrichment_parser.add_argument("--file", type=_path, required=True)
     import_enrichment_parser.add_argument("--batch-size", type=int, default=1000)
 
     claim_parser = sub.add_parser("claim-enrichment", help="拡張タスクをワーカーへリース")
-    claim_parser.add_argument("--enrichment-db", type=_path, default=DEFAULT_ENRICHMENT_DB)
+    claim_parser.add_argument("--enrichment-db", type=_path)
     claim_parser.add_argument("--worker-id", required=True)
     claim_parser.add_argument("--field")
     claim_parser.add_argument("--source-key")
@@ -174,7 +187,7 @@ def _parser() -> argparse.ArgumentParser:
     complete_parser.add_argument("corporate_number")
     complete_parser.add_argument("field_name")
     complete_parser.add_argument("source_key")
-    complete_parser.add_argument("--enrichment-db", type=_path, default=DEFAULT_ENRICHMENT_DB)
+    complete_parser.add_argument("--enrichment-db", type=_path)
     complete_parser.add_argument(
         "--state",
         choices=("found", "not_found_after_policy", "not_applicable", "needs_review", "blocked_by_policy", "failed"),
@@ -191,12 +204,12 @@ def _parser() -> argparse.ArgumentParser:
     parse_contact_parser.add_argument("--out", type=_path, required=True)
 
     sales_ready_parser = sub.add_parser("sales-ready", help="抑止・営業利用可否を反映したリストを出力")
-    sales_ready_parser.add_argument("--enrichment-db", type=_path, default=DEFAULT_ENRICHMENT_DB)
+    sales_ready_parser.add_argument("--enrichment-db", type=_path)
     sales_ready_parser.add_argument("--max-rows", type=int, default=100_000)
     sales_ready_parser.add_argument("--out", type=_path)
 
     worker_parser = sub.add_parser("collect-enrichment", help="公式URLを1ページずつ取得し、連絡先を証拠付きで追加")
-    worker_parser.add_argument("--enrichment-db", type=_path, default=DEFAULT_ENRICHMENT_DB)
+    worker_parser.add_argument("--enrichment-db", type=_path)
     worker_parser.add_argument("--worker-id", required=True)
     worker_parser.add_argument("--field", choices=("website", "phone", "email", "form_url", "location"))
     worker_parser.add_argument("--source-key")
@@ -206,9 +219,92 @@ def _parser() -> argparse.ArgumentParser:
     worker_parser.add_argument("--timeout", type=float, default=15.0)
     worker_parser.add_argument("--max-bytes", type=int, default=2_000_000)
     worker_parser.add_argument("--interval-seconds", type=float, default=0.25)
-    worker_parser.add_argument("--ignore-robots", action="store_true")
     worker_parser.add_argument("--user-agent", default=None)
+
+    embedded_parser = sub.add_parser(
+        "sync-embedded-public",
+        help="同梱済み公開データから法人番号付き事業所連絡先を別スコープで同期",
+    )
+    embedded_parser.add_argument("--enrichment-db", type=_path)
+
+    establishment_parser = sub.add_parser(
+        "establishment-list",
+        help="本社代表連絡先と分離した公開事業所リストを出力",
+    )
+    establishment_parser.add_argument("--enrichment-db", type=_path)
+    establishment_parser.add_argument("--prefecture")
+    establishment_parser.add_argument("--service-type")
+    establishment_parser.add_argument("--limit", type=int, default=100_000)
+    establishment_parser.add_argument("--out", type=_path)
+
+    configure_parser = sub.add_parser("configure", help="保存設定を表示・更新")
+    configure_parser.add_argument("--home", dest="config_home")
+    configure_parser.add_argument("--canonical-db", dest="config_canonical_database")
+    configure_parser.add_argument("--enrichment-db", dest="config_enrichment_database")
+    configure_parser.add_argument("--runtime-db", dest="config_runtime_database")
+    configure_parser.add_argument("--search-index", dest="config_search_index")
+    configure_parser.add_argument("--default-limit", dest="config_default_limit", type=int)
+    configure_parser.add_argument(
+        "--validate-index",
+        dest="config_validate_index",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+
+    health_parser = sub.add_parser("app-health", help="現在の設定・DB・索引・機能可否を読み取り専用で表示")
+    health_parser.add_argument("--out", type=_path)
     return parser
+
+
+_RUNTIME_DEFAULT_COMMANDS = frozenset(
+    {"search", "daemon", "build-search-index", "summary", "sql", "sources"}
+)
+
+
+def _default_database_for_command(command: str, *, canonical_database: Path, runtime_database: Path) -> Path:
+    """Return the safe implicit database for one CLI command.
+
+    Search indexes shipped with the full application are built from the
+    integrated runtime database.  Mutation/build commands must keep using the
+    canonical database as their input, so changing ``resources.DEFAULT_DB``
+    globally would be unsafe.
+    """
+
+    if command in _RUNTIME_DEFAULT_COMMANDS:
+        return runtime_database
+    return canonical_database
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    args = _parser().parse_args(argv)
+    configured_settings_path = args.settings or os.environ.get("QUERIA_SETTINGS")
+    settings_path = (
+        Path(configured_settings_path).expanduser().resolve()
+        if configured_settings_path
+        else default_settings_path(PROJECT_ROOT)
+    )
+    settings = load_settings(settings_path)
+    artifacts = resolve_artifacts(settings, fallback_home=PROJECT_ROOT)
+    if args.db is None:
+        args.db = _default_database_for_command(
+            args.command,
+            canonical_database=artifacts.canonical_database,
+            runtime_database=artifacts.runtime_database,
+        )
+    if hasattr(args, "search_index") and args.search_index is None:
+        args.search_index = artifacts.search_index
+    if hasattr(args, "enrichment_db") and args.enrichment_db is None:
+        args.enrichment_db = artifacts.enrichment_database
+    if hasattr(args, "runtime_db") and args.runtime_db is None:
+        args.runtime_db = artifacts.runtime_database
+    if args.command == "build-search-index" and args.out is None:
+        args.out = artifacts.search_index
+    if args.command == "build-runtime" and args.out is None:
+        args.out = artifacts.runtime_database
+    args.settings_path = settings_path
+    args.app_settings = settings
+    args.resolved_artifacts = artifacts
+    return args
 
 
 def _doctor(db_path: Path, online: bool) -> int:
@@ -256,6 +352,48 @@ def _write_enrichment_rows(path: Path, columns: list[str], rows: list[tuple[obje
                 handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
 
+def _configure(args: argparse.Namespace) -> int:
+    current: AppSettings = args.app_settings
+    updates: dict[str, object] = {}
+    mapping = {
+        "home": "config_home",
+        "canonical_database": "config_canonical_database",
+        "enrichment_database": "config_enrichment_database",
+        "runtime_database": "config_runtime_database",
+        "search_index": "config_search_index",
+        "default_limit": "config_default_limit",
+        "validate_index": "config_validate_index",
+    }
+    for field_name, argument_name in mapping.items():
+        value = getattr(args, argument_name)
+        if value is not None:
+            updates[field_name] = value
+    configured = replace(current, **updates) if updates else current
+    if updates:
+        save_settings(args.settings_path, configured)
+    resolved = resolve_artifacts(configured, fallback_home=PROJECT_ROOT)
+    print(
+        json.dumps(
+            {
+                "saved": bool(updates),
+                "settings_path": str(args.settings_path),
+                "settings": asdict(configured),
+                "resolved": {
+                    "home": str(resolved.home),
+                    "canonical_database": str(resolved.canonical_database),
+                    "enrichment_database": str(resolved.enrichment_database),
+                    "runtime_database": str(resolved.runtime_database),
+                    "search_index": str(resolved.search_index),
+                    "origins": dict(resolved.origins),
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # PyInstaller-launched Windows consoles can inherit the legacy cp932
     # stream even when the project files and JSON are UTF-8.  Reconfigure the
@@ -265,8 +403,22 @@ def main(argv: list[str] | None = None) -> int:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8", errors="replace")
-    args = _parser().parse_args(argv)
     try:
+        args = _parse_args(argv)
+    except SettingsError as exc:
+        print(f"設定エラー: {exc}", file=sys.stderr)
+        return 2
+    try:
+        if args.command == "configure":
+            return _configure(args)
+        if args.command == "app-health":
+            report = inspect_application(args.resolved_artifacts)
+            payload = json.dumps(report, ensure_ascii=False, indent=2, default=str)
+            if args.out is not None:
+                args.out.parent.mkdir(parents=True, exist_ok=True)
+                args.out.write_text(payload + "\n", encoding="utf-8")
+            print(payload)
+            return 0 if report["overall_status"] == "passed" else 1
         if args.command == "refresh":
             result = refresh(
                 scope=args.scope,
@@ -292,6 +444,7 @@ def main(argv: list[str] | None = None) -> int:
                 city=args.city,
                 industry_majors=args.industry_major,
                 industry_middles=args.industry_middle,
+                corporate_kinds=args.corporate_kind,
                 min_employees=args.min_employees,
                 max_employees=args.max_employees,
                 min_capital=args.min_capital,
@@ -384,6 +537,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init-enrichment":
             print(json.dumps(initialize_enrichment_database(args.db, args.enrichment_db), ensure_ascii=False, indent=2))
             return 0
+        if args.command == "sync-embedded-public":
+            print(
+                json.dumps(
+                    sync_embedded_public_enrichment(args.db, args.enrichment_db),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
         if args.command == "seed-enrichment":
             print(
                 json.dumps(
@@ -469,6 +631,20 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(json.dumps([dict(zip(columns, row)) for row in rows], ensure_ascii=False, default=str, indent=2))
             return 0
+        if args.command == "establishment-list":
+            columns, rows = export_establishment_contacts(
+                args.db,
+                enrichment_path=args.enrichment_db,
+                prefecture=args.prefecture,
+                service_type=args.service_type,
+                max_rows=args.limit,
+            )
+            if args.out:
+                _write_enrichment_rows(args.out, columns, rows)
+                print(json.dumps({"rows": len(rows), "out": str(args.out)}, ensure_ascii=False, indent=2))
+            else:
+                print(json.dumps([dict(zip(columns, row)) for row in rows], ensure_ascii=False, default=str, indent=2))
+            return 0
         if args.command == "collect-enrichment":
             print(
                 json.dumps(
@@ -484,8 +660,8 @@ def main(argv: list[str] | None = None) -> int:
                         timeout=args.timeout,
                         max_bytes=args.max_bytes,
                         interval_seconds=args.interval_seconds,
-                        respect_robots=not args.ignore_robots,
-                        user_agent=args.user_agent or "queria-master-enrichment/0.7 (+public-data-contact-research)",
+                        respect_robots=True,
+                        user_agent=args.user_agent or "queria-master-enrichment/0.9 (+public-data-contact-research)",
                     ),
                     ensure_ascii=False,
                     indent=2,
@@ -493,7 +669,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         raise AssertionError(f"Unhandled command: {args.command}")
-    except (PipelineError, EnrichmentError, RuntimeBuildError, AuditError, OSError, ValueError, SemanticIndexError) as exc:
+    except (
+        PipelineError,
+        EnrichmentError,
+        RuntimeBuildError,
+        AuditError,
+        SettingsError,
+        OSError,
+        ValueError,
+        SemanticIndexError,
+    ) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 

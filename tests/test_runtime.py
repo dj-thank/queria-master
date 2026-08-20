@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from queria_master.enrichment import initialize_database
+from queria_master.enrichment import initialize_database, seed_enrichment
 from queria_master.runtime import build_runtime_database, runtime_summary
 
 
@@ -41,14 +41,17 @@ class RuntimeDatabaseTests(unittest.TestCase):
                 con.close()
 
             initialize_database(canonical, enrichment)
+            seed_enrichment(canonical, enrichment_path=enrichment)
             stats = build_runtime_database(canonical, enrichment, runtime, threads=1, memory_limit="1GB")
             self.assertEqual(stats["company_count"], 2)
             self.assertEqual(stats["profile"]["row_count"], 2)
+            self.assertTrue(stats["generation_id"])
             self.assertTrue(runtime.is_file())
 
             summary = runtime_summary(runtime)
             self.assertEqual(summary["counts"]["companies"], 2)
             self.assertEqual(summary["counts"]["search_profiles"], 2)
+            self.assertEqual(summary["manifest"]["generation_id"], stats["generation_id"])
 
             check = duckdb.connect(str(runtime), read_only=True)
             try:
@@ -61,8 +64,14 @@ class RuntimeDatabaseTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     check.execute("SELECT count(*) FROM enrichment.enrichment_state").fetchone()[0],
-                    0,
+                    10,
                 )
+                effective_url, official_url = check.execute(
+                    "SELECT effective_company_url, official_url FROM search.company_documents "
+                    "WHERE corporate_number = '1000000000001'"
+                ).fetchone()
+                self.assertEqual(effective_url, "https://a.example.jp")
+                self.assertIsNone(official_url)
             finally:
                 check.close()
 

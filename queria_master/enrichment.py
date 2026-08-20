@@ -15,7 +15,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from .resources import DEFAULT_DB, PROJECT_ROOT
 
 
-ENRICHMENT_SCHEMA_VERSION = "2"
+ENRICHMENT_SCHEMA_VERSION = "3"
 DEFAULT_ENRICHMENT_DB = PROJECT_ROOT / "data" / "queria_enrichment.duckdb"
 ENRICHMENT_STATES = frozenset(
     {
@@ -351,6 +351,26 @@ CREATE TABLE IF NOT EXISTS enrichment.company_locations (
     UNIQUE (corporate_number, location_type, address_normalized)
 );
 
+CREATE TABLE IF NOT EXISTS enrichment.company_establishments (
+    establishment_id VARCHAR PRIMARY KEY,
+    corporate_number VARCHAR NOT NULL,
+    source_key VARCHAR NOT NULL,
+    source_record_id VARCHAR NOT NULL,
+    service_type VARCHAR,
+    establishment_name VARCHAR,
+    address VARCHAR,
+    phone_raw VARCHAR,
+    phone_normalized VARCHAR,
+    fax_raw VARCHAR,
+    url VARCHAR,
+    contact_scope VARCHAR NOT NULL,
+    source_evidence_id VARCHAR,
+    observed_at TIMESTAMPTZ NOT NULL,
+    status VARCHAR NOT NULL,
+    confidence DOUBLE,
+    UNIQUE (source_key, source_record_id, service_type, corporate_number)
+);
+
 CREATE TABLE IF NOT EXISTS enrichment.enrichment_state (
     corporate_number VARCHAR NOT NULL,
     field_name VARCHAR NOT NULL,
@@ -393,6 +413,10 @@ CREATE INDEX IF NOT EXISTS idx_enrichment_contacts_corporate
     ON enrichment.company_contact_points(corporate_number, contact_type, status);
 CREATE INDEX IF NOT EXISTS idx_enrichment_contacts_value
     ON enrichment.company_contact_points(contact_type, value_normalized);
+CREATE INDEX IF NOT EXISTS idx_enrichment_establishment_company
+    ON enrichment.company_establishments(corporate_number, status);
+CREATE INDEX IF NOT EXISTS idx_enrichment_establishment_phone
+    ON enrichment.company_establishments(phone_normalized);
 CREATE INDEX IF NOT EXISTS idx_enrichment_state_queue
     ON enrichment.enrichment_state(state, next_attempt_at, lease_until);
 CREATE INDEX IF NOT EXISTS idx_compliance_suppressions_corporate
@@ -425,7 +449,10 @@ WITH latest_states AS (
         corporate_number,
         max(CASE WHEN contact_type = 'phone' AND status = 'found' THEN 1 ELSE 0 END) AS has_phone,
         max(CASE WHEN contact_type = 'email' AND status = 'found' THEN 1 ELSE 0 END) AS has_email,
-        max(CASE WHEN contact_type = 'form_url' AND status = 'found' THEN 1 ELSE 0 END) AS has_form
+        max(CASE WHEN contact_type = 'form_url' AND status = 'found' THEN 1 ELSE 0 END) AS has_form,
+        max(CASE WHEN contact_type = 'phone' AND status = 'found' AND sales_eligibility = 'allowed' THEN 1 ELSE 0 END) AS has_allowed_phone,
+        max(CASE WHEN contact_type = 'email' AND status = 'found' AND sales_eligibility = 'allowed' THEN 1 ELSE 0 END) AS has_allowed_email,
+        max(CASE WHEN contact_type = 'form_url' AND status = 'found' AND sales_eligibility = 'allowed' THEN 1 ELSE 0 END) AS has_allowed_form
     FROM enrichment.company_contact_points
     GROUP BY corporate_number
 )
@@ -457,7 +484,9 @@ SELECT
               AND (x.effective_from IS NULL OR x.effective_from <= current_timestamp)
               AND (x.effective_to IS NULL OR x.effective_to > current_timestamp)
         ) THEN 'blocked_by_policy'
-        WHEN coalesce(f.has_phone, 0) = 1 OR coalesce(f.has_email, 0) = 1 OR coalesce(f.has_form, 0) = 1 THEN 'ready'
+        WHEN coalesce(f.has_allowed_phone, 0) = 1
+          OR coalesce(f.has_allowed_email, 0) = 1
+          OR coalesce(f.has_allowed_form, 0) = 1 THEN 'ready'
         WHEN coalesce(s.website_state, 'pending') IN ('pending', 'leased')
           OR coalesce(s.phone_state, 'pending') IN ('pending', 'leased')
           OR coalesce(s.email_state, 'pending') IN ('pending', 'leased')
@@ -500,7 +529,8 @@ WITH allowed_contacts AS (
 ), websites AS (
     SELECT corporate_number, normalized_url AS official_url
     FROM enrichment.company_websites
-    WHERE status IN ('found', 'verified')
+    WHERE status = 'verified'
+      AND website_role = 'official_homepage'
     QUALIFY row_number() OVER (
         PARTITION BY corporate_number
         ORDER BY confidence DESC NULLS LAST, checked_at DESC NULLS LAST, first_seen_at DESC
@@ -543,6 +573,19 @@ WHERE NOT EXISTS (
       AND (s.effective_from IS NULL OR s.effective_from <= current_timestamp)
       AND (s.effective_to IS NULL OR s.effective_to > current_timestamp)
 );
+
+CREATE OR REPLACE VIEW crm.v_company_establishment_summary AS
+SELECT
+    corporate_number,
+    count(*) AS establishment_count,
+    count(*) FILTER (WHERE phone_normalized IS NOT NULL) AS establishment_phone_count,
+    count(*) FILTER (WHERE url IS NOT NULL) AS establishment_url_count,
+    min(phone_normalized) FILTER (WHERE phone_normalized IS NOT NULL) AS sample_establishment_phone,
+    min(url) FILTER (WHERE url IS NOT NULL) AS sample_establishment_url,
+    max(observed_at) AS last_observed_at
+FROM enrichment.company_establishments
+WHERE status IN ('found', 'verified')
+GROUP BY corporate_number;
 """
 
 
@@ -614,6 +657,202 @@ def initialize_database(
         writer_lock.release()
 
 
+def sync_embedded_public_enrichment(
+    database_path: Path = DEFAULT_DB,
+    enrichment_path: Path = DEFAULT_ENRICHMENT_DB,
+) -> dict[str, Any]:
+    """Import corporate-number-linked public establishment contacts.
+
+    MHLW care/disability rows describe establishments, not headquarters. They
+    stay in a dedicated table with ``contact_scope='establishment'`` and are
+    never promoted to the representative phone/email fields.
+    """
+
+    database_path = Path(database_path).resolve()
+    enrichment_path = Path(enrichment_path).resolve()
+    if database_path == enrichment_path:
+        raise EnrichmentError("canonical DBと拡張DBは別ファイルにしてください。")
+    enrichment_path.parent.mkdir(parents=True, exist_ok=True)
+    con, writer_lock = _open_writer(enrichment_path)
+    attached = False
+    try:
+        _attach_canonical(con, database_path)
+        attached = True
+        initialize_enrichment_schema(con, company_relation="canonical.core.companies")
+        con.execute(
+            """
+            CREATE TEMP TABLE _embedded_public_rows(
+                establishment_id VARCHAR,
+                evidence_id VARCHAR,
+                corporate_number VARCHAR,
+                source_key VARCHAR,
+                source_record_id VARCHAR,
+                service_type VARCHAR,
+                establishment_name VARCHAR,
+                address VARCHAR,
+                phone_raw VARCHAR,
+                phone_normalized VARCHAR,
+                fax_raw VARCHAR,
+                url VARCHAR
+            )
+            """
+        )
+        sources = (
+            {
+                "schema": "mhlw",
+                "table": "kaigo_establishment",
+                "source_key": "mhlw.kaigo_establishment",
+                "address": "NULLIF(trim(CAST(address AS VARCHAR)), '')",
+            },
+            {
+                "schema": "mhlw",
+                "table": "shougai_establishment",
+                "source_key": "mhlw.shougai_establishment",
+                "address": "NULLIF(trim(concat_ws('', CAST(address_city AS VARCHAR), CAST(address_detail AS VARCHAR))), '')",
+            },
+        )
+        imported_sources: list[str] = []
+        for source in sources:
+            exists = con.execute(
+                """
+                SELECT count(*)
+                FROM duckdb_tables()
+                WHERE database_name = 'canonical' AND schema_name = ? AND table_name = ?
+                """,
+                [source["schema"], source["table"]],
+            ).fetchone()[0]
+            if not exists:
+                continue
+            relation = f"canonical.{_quote_identifier(source['schema'])}.{_quote_identifier(source['table'])}"
+            source_key = _sql_string(source["source_key"])
+            con.execute(
+                f"""
+                INSERT INTO _embedded_public_rows
+                SELECT
+                    md5({source_key} || '|' || trim(CAST(corporate_number AS VARCHAR)) || '|' ||
+                        coalesce(CAST(establishment_number AS VARCHAR), '') || '|' ||
+                        coalesce(CAST(service_type AS VARCHAR), '') || '|' ||
+                        coalesce(CAST(phone AS VARCHAR), '') || '|' || coalesce(CAST(url AS VARCHAR), '')),
+                    md5('evidence|' || {source_key} || '|' || trim(CAST(corporate_number AS VARCHAR)) || '|' ||
+                        coalesce(CAST(establishment_number AS VARCHAR), '') || '|' ||
+                        coalesce(CAST(service_type AS VARCHAR), '') || '|' ||
+                        coalesce(CAST(phone AS VARCHAR), '') || '|' || coalesce(CAST(url AS VARCHAR), '')),
+                    trim(CAST(corporate_number AS VARCHAR)),
+                    {source_key},
+                    coalesce(NULLIF(trim(CAST(establishment_number AS VARCHAR)), ''),
+                             md5(coalesce(CAST(name AS VARCHAR), '') || '|' ||
+                                 coalesce(CAST(phone AS VARCHAR), '') || '|' || coalesce(CAST(url AS VARCHAR), ''))),
+                    NULLIF(trim(CAST(service_type AS VARCHAR)), ''),
+                    NULLIF(trim(CAST(name AS VARCHAR)), ''),
+                    {source['address']},
+                    NULLIF(trim(CAST(phone AS VARCHAR)), ''),
+                    NULLIF(regexp_replace(trim(CAST(phone AS VARCHAR)), '[^0-9+]', '', 'g'), ''),
+                    NULLIF(trim(CAST(fax AS VARCHAR)), ''),
+                    NULLIF(trim(CAST(url AS VARCHAR)), '')
+                FROM {relation}
+                WHERE regexp_full_match(trim(CAST(corporate_number AS VARCHAR)), '[0-9]{{13}}')
+                  AND (NULLIF(trim(CAST(phone AS VARCHAR)), '') IS NOT NULL
+                       OR NULLIF(trim(CAST(url AS VARCHAR)), '') IS NOT NULL)
+                """
+            )
+            imported_sources.append(str(source["source_key"]))
+
+        con.execute("BEGIN TRANSACTION")
+        try:
+            _execute_local(
+                con,
+                """
+                INSERT INTO enrichment.evidence_documents(
+                    evidence_id, corporate_number, source_key, source_url, retrieved_at,
+                    extractor_version, policy_status, evidence_status, notes
+                )
+                SELECT evidence_id, corporate_number, source_key, NULL, current_timestamp,
+                       'embedded-public-v1', 'not_checked', 'found',
+                       'corporate-number-linked public establishment record'
+                FROM _embedded_public_rows
+                ON CONFLICT (evidence_id) DO UPDATE SET
+                    retrieved_at = excluded.retrieved_at,
+                    evidence_status = excluded.evidence_status,
+                    notes = excluded.notes
+                """,
+            )
+            _execute_local(
+                con,
+                """
+                INSERT INTO enrichment.company_establishments(
+                    establishment_id, corporate_number, source_key, source_record_id,
+                    service_type, establishment_name, address, phone_raw, phone_normalized,
+                    fax_raw, url, contact_scope, source_evidence_id, observed_at, status, confidence
+                )
+                SELECT establishment_id, corporate_number, source_key, source_record_id,
+                       service_type, establishment_name, address, phone_raw, phone_normalized,
+                       fax_raw, url, 'establishment', evidence_id, current_timestamp, 'found', 0.95
+                FROM _embedded_public_rows
+                ON CONFLICT (source_key, source_record_id, service_type, corporate_number) DO UPDATE SET
+                    establishment_name = excluded.establishment_name,
+                    address = excluded.address,
+                    phone_raw = excluded.phone_raw,
+                    phone_normalized = excluded.phone_normalized,
+                    fax_raw = excluded.fax_raw,
+                    url = excluded.url,
+                    source_evidence_id = excluded.source_evidence_id,
+                    observed_at = excluded.observed_at,
+                    status = excluded.status,
+                    confidence = excluded.confidence
+                """,
+            )
+            for field_name, predicate in (
+                ("establishment_phone", "phone_normalized IS NOT NULL"),
+                ("establishment_url", "url IS NOT NULL"),
+            ):
+                _execute_local(
+                    con,
+                    f"""
+                    INSERT INTO enrichment.enrichment_state(
+                        corporate_number, field_name, source_key, state, attempt_count,
+                        last_completed_at, last_evidence_id, updated_at
+                    )
+                    SELECT corporate_number, ?, source_key, 'found', 1,
+                           current_timestamp, min(evidence_id), current_timestamp
+                    FROM _embedded_public_rows
+                    WHERE {predicate}
+                    GROUP BY corporate_number, source_key
+                    ON CONFLICT (corporate_number, field_name, source_key) DO UPDATE SET
+                        state = 'found', last_completed_at = excluded.last_completed_at,
+                        last_evidence_id = excluded.last_evidence_id, updated_at = excluded.updated_at
+                    """,
+                    [field_name],
+                )
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+        stats = _execute_local(
+            con,
+            """
+            SELECT count(*),
+                   count(DISTINCT corporate_number) FILTER (WHERE phone_normalized IS NOT NULL),
+                   count(DISTINCT corporate_number) FILTER (WHERE url IS NOT NULL)
+            FROM enrichment.company_establishments
+            """,
+        ).fetchone()
+        con.execute("CHECKPOINT")
+        return {
+            "canonical_database": str(database_path),
+            "enrichment_database": str(enrichment_path),
+            "sources": imported_sources,
+            "establishment_records": int(stats[0]),
+            "companies_with_establishment_phone": int(stats[1]),
+            "companies_with_establishment_url": int(stats[2]),
+            "contact_scope": "establishment",
+        }
+    finally:
+        if attached:
+            con.execute("DETACH canonical")
+        con.close()
+        writer_lock.release()
+
+
 def preserve_enrichment_layer(con: Any, previous_database_path: Path) -> dict[str, int]:
     """Copy evidence facts from a previous DB during an atomic canonical rebuild."""
 
@@ -628,6 +867,7 @@ def preserve_enrichment_layer(con: Any, previous_database_path: Path) -> dict[st
         ("enrichment", "company_websites"),
         ("enrichment", "company_contact_points"),
         ("enrichment", "company_locations"),
+        ("enrichment", "company_establishments"),
         ("enrichment", "enrichment_state"),
         ("compliance", "suppressions"),
     )
@@ -1500,6 +1740,71 @@ def export_sales_ready_accounts(
         con.close()
 
 
+def export_establishment_contacts(
+    database_path: Path = DEFAULT_DB,
+    *,
+    enrichment_path: Path = DEFAULT_ENRICHMENT_DB,
+    prefecture: str | None = None,
+    service_type: str | None = None,
+    max_rows: int | None = 100_000,
+) -> tuple[list[str], list[tuple[Any, ...]]]:
+    """Return public establishment contacts without calling them HQ contacts."""
+
+    if max_rows is not None and max_rows < 1:
+        raise EnrichmentError("max_rows は1以上で指定してください。")
+    enrichment_path = Path(enrichment_path).resolve()
+    if not enrichment_path.is_file():
+        raise EnrichmentError(f"拡張DBがありません: {enrichment_path}")
+    con = _duckdb().connect(str(enrichment_path), read_only=True)
+    attached = False
+    try:
+        _attach_canonical(con, Path(database_path).resolve())
+        attached = True
+        clauses = ["e.status IN ('found', 'verified')"]
+        params: list[Any] = []
+        if prefecture:
+            clauses.append("c.prefecture_name = ?")
+            params.append(prefecture)
+        if service_type:
+            clauses.append("e.service_type = ?")
+            params.append(service_type)
+        limit_sql = "" if max_rows is None else " LIMIT ?"
+        if max_rows is not None:
+            params.append(max_rows)
+        result = _execute_local(
+            con,
+            """
+            SELECT
+                c.corporate_number,
+                c.company_name,
+                c.prefecture_name,
+                c.city_name,
+                e.source_record_id AS establishment_number,
+                e.establishment_name,
+                e.service_type,
+                e.address AS establishment_address,
+                e.phone_normalized AS establishment_phone,
+                e.url AS establishment_url,
+                e.source_key,
+                e.contact_scope,
+                e.confidence,
+                e.observed_at
+            FROM enrichment.company_establishments e
+            JOIN canonical.core.companies c USING (corporate_number)
+            WHERE """
+            + " AND ".join(clauses)
+            + " ORDER BY c.corporate_number, e.source_key, e.source_record_id"
+            + limit_sql,
+            params,
+        )
+        columns = [str(item[0]) for item in result.description]
+        return columns, [tuple(row) for row in result.fetchall()]
+    finally:
+        if attached:
+            con.execute("DETACH canonical")
+        con.close()
+
+
 def iter_jsonl_records(path: Path) -> Iterator[Mapping[str, Any]]:
     with Path(path).open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -1520,6 +1825,7 @@ __all__ = [
     "claim_enrichment_tasks",
     "complete_enrichment_task",
     "export_sales_ready_accounts",
+    "export_establishment_contacts",
     "hash_normalized",
     "import_enrichment_jsonl",
     "import_enrichment_records",
@@ -1532,4 +1838,5 @@ __all__ = [
     "normalize_url",
     "preserve_enrichment_layer",
     "seed_enrichment",
+    "sync_embedded_public_enrichment",
 ]

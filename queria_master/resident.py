@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable, TextIO
 
 from .search_index import DEFAULT_SEARCH_INDEX, SEARCH_RESULT_COLUMNS, SearchIndex
-from .resources import DEFAULT_DB
+from .runtime import DEFAULT_RUNTIME_DB
 
 
 class ResidentSearchSession:
@@ -16,7 +16,7 @@ class ResidentSearchSession:
     def __init__(
         self,
         *,
-        database_path: Path = DEFAULT_DB,
+        database_path: Path = DEFAULT_RUNTIME_DB,
         search_index: Path = DEFAULT_SEARCH_INDEX,
         validate_database: bool = True,
     ) -> None:
@@ -36,6 +36,7 @@ class ResidentSearchSession:
     def search(self, request: dict[str, Any]) -> list[dict[str, Any]]:
         industry_majors = _as_strings(request.get("industry_majors"))
         industry_middles = _as_strings(request.get("industry_middles"))
+        corporate_kinds = _as_strings(request.get("corporate_kinds"))
         limit = int(request.get("limit", 1000))
         return self.index.search(
             request.get("keyword"),
@@ -43,6 +44,7 @@ class ResidentSearchSession:
             city=request.get("city"),
             industry_majors=industry_majors,
             industry_middles=industry_middles,
+            corporate_kinds=corporate_kinds,
             min_employees=_as_int(request.get("min_employees")),
             max_employees=_as_int(request.get("max_employees")),
             min_capital=_as_int(request.get("min_capital")),
@@ -84,7 +86,7 @@ def _compact_response(rows: list[dict[str, Any]], elapsed_ms: float) -> dict[str
 
 def run_jsonl_protocol(
     *,
-    database_path: Path = DEFAULT_DB,
+    database_path: Path = DEFAULT_RUNTIME_DB,
     search_index: Path = DEFAULT_SEARCH_INDEX,
     input_stream: TextIO = sys.stdin,
     output_stream: TextIO = sys.stdout,

@@ -8,6 +8,7 @@ from typing import Any, Iterable, Sequence
 
 from .pipeline import PipelineError
 from .resources import DEFAULT_DB
+from .runtime import DEFAULT_RUNTIME_DB
 from .search_index import DEFAULT_SEARCH_INDEX, SearchIndex, SearchIndexError
 from .semantic_index import (
     DEFAULT_SEMANTIC_INDEX,
@@ -301,12 +302,13 @@ def _write_rows(path: Path, columns: Sequence[str], rows: Iterable[Sequence[Any]
 
 def search_companies(
     *,
-    db_path: Path = DEFAULT_DB,
+    db_path: Path = DEFAULT_RUNTIME_DB,
     keyword: str | None = None,
     prefecture: str | None = None,
     city: str | None = None,
     industry_majors: Sequence[str] = (),
     industry_middles: Sequence[str] = (),
+    corporate_kinds: Sequence[str] = (),
     min_employees: int | None = None,
     max_employees: int | None = None,
     min_capital: int | None = None,
@@ -327,6 +329,7 @@ def search_companies(
     invalid_middles = sorted({value for value in normalized_middles if not re.fullmatch(r"[0-9]{2}", value)})
     if invalid_middles:
         raise PipelineError(f"中分類コードは2桁の数字です。不正値: {', '.join(invalid_middles)}")
+    normalized_kinds = tuple(str(value).strip() for value in corporate_kinds if str(value).strip())
 
     # A keyword query is the expensive path in DuckDB because the legacy
     # implementation must scan several large text columns with ILIKE.  Use
@@ -344,6 +347,7 @@ def search_companies(
                         city=city,
                         industry_majors=normalized_majors,
                         industry_middles=normalized_middles,
+                        corporate_kinds=normalized_kinds,
                         min_employees=min_employees,
                         max_employees=max_employees,
                         min_capital=min_capital,
@@ -370,6 +374,7 @@ def search_companies(
                     "phone",
                     "email",
                     "inquiry_form_url",
+                    "corporate_kind_code",
                 ]
                 rows = [tuple(hit.get(column) for column in columns) for hit in hits]
                 if out is None:
@@ -407,6 +412,10 @@ def search_companies(
         params.append(max_capital)
     if has_web:
         conditions.append("c.company_url IS NOT NULL AND trim(c.company_url) <> ''")
+    if normalized_kinds:
+        placeholders = ", ".join("?" for _ in normalized_kinds)
+        conditions.append(f"c.corporate_kind_code IN ({placeholders})")
+        params.extend(normalized_kinds)
     if normalized_majors:
         placeholders = ", ".join("?" for _ in normalized_majors)
         conditions.append(
@@ -445,6 +454,7 @@ def search_companies(
                 c.representative_name,
                 c.company_url,
                 c.business_summary
+                ,c.corporate_kind_code
             FROM core.companies c
             WHERE {' AND '.join(conditions)}
             ORDER BY c.employee_number DESC NULLS LAST, c.capital_stock DESC NULLS LAST, c.company_name
@@ -550,7 +560,7 @@ def semantic_search_companies(
     return len(rows)
 
 
-def show_summary(db_path: Path = DEFAULT_DB) -> None:
+def show_summary(db_path: Path = DEFAULT_RUNTIME_DB) -> None:
     con = _open_database(db_path)
     try:
         print("[収録件数・充足率]")
