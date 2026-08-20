@@ -1,0 +1,41 @@
+name: CompanyMaster Windows Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: company_scout
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Rust stable
+        run: |
+          rustup default stable
+          rustup update stable
+      - name: Install frontend dependencies
+        shell: pwsh
+        run: npm install
+      - name: Bundle pinned Codex
+        shell: pwsh
+        run: .\scripts\fetch-codex.ps1
+      - name: Build Tauri installers
+        shell: pwsh
+        run: npm run tauri:build
+      - name: Upload Windows installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: CompanyMaster-Windows
+          path: |
+            company_scout/src-tauri/target/release/bundle/**/*.exe
+            company_scout/src-tauri/target/release/bundle/**/*.msi
+          if-no-files-found: error
