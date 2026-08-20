@@ -30,7 +30,16 @@ jobs:
         run: .\scripts\fetch-codex.ps1
       - name: Build Tauri installers
         shell: pwsh
-        run: npm run tauri:build
+        run: |
+          npm run tauri:build 2>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: CompanyMaster-build-log
+          path: company_scout/build.log
+          if-no-files-found: warn
       - name: Upload Windows installers
         uses: actions/upload-artifact@v4
         with:
