@@ -49,7 +49,7 @@ const blankPlan: SearchPlan = {
   limit: 30000,
 };
 
-type View = "search" | "research" | "connections";
+type View = "search" | "ai" | "research" | "connections";
 
 const fmt = new Intl.NumberFormat("ja-JP");
 const splitValues = (value: string) => value.split(/[、,\n]/).map((v) => v.trim()).filter(Boolean);
@@ -109,7 +109,6 @@ function compactNumber(value?: number | null) {
 
 function App() {
   const [view, setView] = useState<View>("search");
-  const [searchMode, setSearchMode] = useState<"ai" | "fields">("fields");
   const [prompt, setPrompt] = useState("東京都のSaaS・受託開発会社で、従業員30〜300名、Webサイトあり");
   const [plan, setPlan] = useState<SearchPlan>(blankPlan);
   const [result, setResult] = useState<SearchResult | null>(null);
@@ -127,6 +126,7 @@ function App() {
   const [message, setMessage] = useState<string>("");
   const [listName, setListName] = useState("営業候補");
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
+  const [fieldCategory, setFieldCategory] = useState<"region" | "industry" | "organization" | "scale" | "keywords">("region");
   const [listScrollTop, setListScrollTop] = useState(0);
   const listScrollRef = useRef<HTMLDivElement>(null);
 
@@ -186,6 +186,7 @@ function App() {
       const found = await api.search(next, 1, displayPageSize(next));
       setResult(found);
       setSelected(found.rows[0] ?? null);
+      setView("search");
       setListScrollTop(0);
       listScrollRef.current?.scrollTo({ top: 0 });
     } catch (error) {
@@ -433,6 +434,7 @@ function App() {
         </div>
         <nav>
           <button className={view === "search" ? "active" : ""} onClick={() => setView("search")}><Search size={17} />検索</button>
+          <button className={view === "ai" ? "active" : ""} onClick={() => setView("ai")}><Bot size={17} />AI検索</button>
           <button className={view === "research" ? "active" : ""} onClick={() => setView("research")}><FileSearch size={17} />企業調査</button>
           <button className={view === "connections" ? "active" : ""} onClick={() => setView("connections")}><Settings2 size={17} />接続</button>
         </nav>
@@ -463,54 +465,32 @@ function App() {
         {view === "search" && (
           <section className="workspace">
             <div className="search-mode-header">
-              <div className="search-heading"><span className="eyebrow"><Search size={14} /> Company Search</span><h1>企業検索</h1><p>AIに相談するか、条件を選んで正確に絞り込みます。</p></div>
-              <div className="search-mode-tabs" role="tablist" aria-label="検索方式">
-                <button className={searchMode === "ai" ? "active" : ""} onClick={() => setSearchMode("ai")} role="tab" aria-selected={searchMode === "ai"}><Bot size={15} /><span>AI検索</span><small>自然文で相談</small></button>
-                <button className={searchMode === "fields" ? "active" : ""} onClick={() => setSearchMode("fields")} role="tab" aria-selected={searchMode === "fields"}><Settings2 size={15} /><span>項目検索</span><small>条件を選択</small></button>
-              </div>
+              <div className="search-heading"><span className="eyebrow"><Settings2 size={14} /> 項目検索</span><h1>企業検索</h1><p>条件を選択して、必要な企業だけを正確に絞り込みます。</p></div>
+              <span className="field-mode-badge"><Settings2 size={13} /> 選択式フィルター</span>
             </div>
 
-            <div className={`hero-search ${searchMode === "fields" ? "field-search-card" : "ai-search-card"}`}>
-              {searchMode === "ai" && <>
-                <div className="eyebrow"><Bot size={15} /> Lunaに条件を相談</div>
-                <div className="prompt-row">
-                  <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="例：関東の食品メーカーで、従業員100名以上。ECに力を入れていそうな会社を3万件以内で" />
-                  <button className="send" onClick={consultAndSearch} disabled={!!busy || !codex?.authenticated || !codex?.luna_available} title="相談して検索">
-                    {busy === "plan" ? <Loader2 className="spin" size={20} /> : <Send size={20} />}
-                  </button>
-                </div>
-                <div className="ai-examples"><span>例から始める</span><button onClick={() => setPrompt("東京都の情報通信業で、従業員50名以上、Webサイトあり")}>東京のIT企業</button><button onClick={() => setPrompt("製造業で、従業員100〜500名、Webサイトあり")}>中堅メーカー</button><button onClick={() => setPrompt("法人向けSaaSを提供する会社")}>法人向けSaaS</button></div>
-                <div className="memory-row">
-                  <span className="memory-label">検索メモリー</span>
-                  <select value="" onChange={(e) => { const item = savedSearches.find((v) => v.id === e.target.value); if (!item) return; setPrompt(item.query); setPlan(item.plan); setPage(1); void runSearch(1, item.plan); }}>
-                    <option value="">過去の検索を呼び出す</option>
-                    {savedSearches.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                  </select>
-                  <span className="muted">{savedSearches.length ? `${savedSearches.length}件` : "未保存"}</span>
-                </div>
-                <div className="ai-search-note"><Sparkles size={14} /><span>Lunaが条件をJSON化し、地域・業種・規模などの項目へ変換してから検索します。</span></div>
-              </>}
+            <div className="hero-search field-search-card">
+              <div className="field-search-intro"><div><strong>項目を選んで検索</strong><span>カテゴリを切り替えて選択できます。画面全体を縦にスクロールする必要はありません。</span></div></div>
+              <div className="chips field-summary"><span className="filter-label"><Filter size={14} />選択中</span>{filters.length ? filters.map((f) => <span className="chip" key={f}>{f}</span>) : <span className="muted">条件なし（全国・全業種）</span>}<button className="ghost tiny" onClick={() => runSearch(1)} disabled={!!busy}><RefreshCw size={13} />再検索</button></div>
 
-              {searchMode === "fields" && <>
-                <div className="field-search-intro"><div><strong>項目を選んで検索</strong><span>選択した条件は下の検索ボタンで適用されます。</span></div><button className="ghost small" onClick={() => setSearchMode("ai")}><Bot size={14} />AI検索へ</button></div>
-                <div className="chips field-summary"><span className="filter-label"><Filter size={14} />選択中</span>{filters.length ? filters.map((f) => <span className="chip" key={f}>{f}</span>) : <span className="muted">条件なし（全国・全業種）</span>}<button className="ghost tiny" onClick={() => runSearch(1)} disabled={!!busy}><RefreshCw size={13} />再検索</button></div>
-              </>}
-
-              {searchMode === "fields" && <div className="condition-panel">
+              <div className="condition-panel">
                 <div className="condition-panel-head">
                   <div><span className="condition-title"><Settings2 size={14}/> 条件を選んで絞り込み</span><small>クリックで複数選択。条件は検索ボタンを押すまで適用されません。</small></div>
                   <button className="ghost tiny" onClick={() => setPlan({ ...blankPlan })} disabled={!!busy}>条件をクリア</button>
                 </div>
+                <div className="field-category-tabs" role="tablist" aria-label="項目検索カテゴリ">
+                  {([['region', '地域'], ['industry', '業種'], ['organization', '法人種別'], ['scale', '規模・設立'], ['keywords', 'キーワード']] as const).map(([id, label]) => <button key={id} className={fieldCategory === id ? "active" : ""} onClick={() => setFieldCategory(id)} role="tab" aria-selected={fieldCategory === id}>{label}{id === "region" && plan.prefectures.length > 0 && <b>{plan.prefectures.length}</b>}{id === "industry" && (plan.industry_codes.length + plan.industry_terms.length) > 0 && <b>{plan.industry_codes.length + plan.industry_terms.length}</b>}{id === "organization" && plan.company_kinds.length > 0 && <b>{plan.company_kinds.length}</b>}{id === "keywords" && (plan.keyword_any.length + plan.keyword_all.length) > 0 && <b>{plan.keyword_any.length + plan.keyword_all.length}</b>}</button>)}
+                </div>
 
-                <div className="condition-section">
+                {fieldCategory === "region" && <div className="condition-section">
                   <div className="condition-section-head"><strong>地域</strong><span>{plan.prefectures.length ? `${plan.prefectures.length}都道府県` : "全国"}</span></div>
                   <div className="option-grid prefecture-options">
                     {prefectures.map((value) => <button key={value} className={`option-pill ${plan.prefectures.includes(value) ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, prefectures: toggleValue(p.prefectures, value) }))}>{value}</button>)}
                   </div>
                   <div className="condition-input-row"><label><span>市区町村（任意）</span><input value={plan.cities.join(", ")} onChange={(e) => setPlan((p) => ({ ...p, cities: splitValues(e.target.value) }))} placeholder="千代田区、横浜市" /></label></div>
-                </div>
+                </div>}
 
-                <div className="condition-section">
+                {fieldCategory === "industry" && <div className="condition-section">
                   <div className="condition-section-head"><strong>業種</strong><span>大きな分類から選択できます</span></div>
                   <div className="option-grid industry-options">
                     {industryPresets.map((preset) => {
@@ -523,27 +503,27 @@ function App() {
                     {industryMiddle.map((item) => <button key={item.code} className={`option-pill ${plan.industry_codes.includes(item.code) ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, industry_codes: toggleValue(p.industry_codes, item.code) }))}><b>{item.code}</b>{item.label}</button>)}
                   </div>
                   <div className="condition-input-row two"><label><span>業種コード（小分類・細分類も可）</span><input value={plan.industry_codes.filter((code) => !industryMiddle.some((item) => item.code === code)).join(", ")} onChange={(e) => setPlan((p) => ({ ...p, industry_codes: [...industryMiddle.map((item) => item.code).filter((code) => p.industry_codes.includes(code)), ...splitValues(e.target.value)] }))} placeholder="例: 391 / 3911" /></label><label><span>業種キーワード</span><input value={plan.industry_terms.join(", ")} onChange={(e) => setPlan((p) => ({ ...p, industry_terms: splitValues(e.target.value) }))} placeholder="SaaS、食品製造" /></label></div>
-                </div>
+                </div>}
 
-                <div className="condition-section">
+                {fieldCategory === "organization" && <div className="condition-section">
                   <div className="condition-section-head"><strong>法人種別</strong><span>{plan.company_kinds.length ? `${plan.company_kinds.length}種類` : "指定なし"}</span></div>
                   <div className="option-grid kind-options">{companyKinds.map((kind) => <button key={kind} className={`option-pill ${plan.company_kinds.includes(kind) ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, company_kinds: toggleValue(p.company_kinds, kind) }))}>{kind}</button>)}</div>
-                </div>
+                </div>}
 
-                <div className="condition-section">
+                {fieldCategory === "scale" && <div className="condition-section">
                   <div className="condition-section-head"><strong>規模・設立</strong><span>よく使う範囲をワンクリック</span></div>
                   <div className="range-group"><span className="range-label">従業員数</span><div className="range-options">{employeeRanges.map((range) => { const active = plan.min_employees === range.min && plan.max_employees === range.max; return <button key={range.label} className={`range-choice ${active ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, min_employees: range.min, max_employees: range.max }))}>{range.label}</button>; })}</div></div>
                   <div className="range-group"><span className="range-label">資本金</span><div className="range-options">{capitalRanges.map((range) => { const active = plan.min_capital === range.min && plan.max_capital === range.max; return <button key={range.label} className={`range-choice ${active ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, min_capital: range.min, max_capital: range.max }))}>{range.label}</button>; })}</div></div>
                   <div className="range-group"><span className="range-label">設立年</span><div className="range-options">{establishedRanges.map((range) => { const active = plan.established_from === range.from && plan.established_to === range.to; return <button key={range.label} className={`range-choice ${active ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, established_from: range.from, established_to: range.to }))}>{range.label}</button>; })}</div></div>
                   <div className="condition-input-row three"><label><span>従業員 最小</span><input type="number" min={0} value={plan.min_employees ?? ""} onChange={(e) => setPlan((p) => ({ ...p, min_employees: optionalNumber(e.target.value) }))} /></label><label><span>従業員 最大</span><input type="number" min={0} value={plan.max_employees ?? ""} onChange={(e) => setPlan((p) => ({ ...p, max_employees: optionalNumber(e.target.value) }))} /></label><label><span>Webサイト</span><select value={plan.website_required == null ? "any" : plan.website_required ? "yes" : "no"} onChange={(e) => setPlan((p) => ({ ...p, website_required: e.target.value === "any" ? undefined : e.target.value === "yes" }))}><option value="any">指定なし</option><option value="yes">あり</option><option value="no">なし</option></select></label></div>
-                </div>
+                </div>}
 
-                <div className="condition-section compact-section">
+                {fieldCategory === "keywords" && <div className="condition-section compact-section">
                   <div className="condition-input-row two"><label><span>キーワード（いずれかを含む）</span><input value={plan.keyword_any.join(", ")} onChange={(e) => setPlan((p) => ({ ...p, keyword_any: splitValues(e.target.value) }))} placeholder="SaaS、クラウド、食品" /></label><label><span>キーワード（すべてを含む）</span><input value={plan.keyword_all.join(", ")} onChange={(e) => setPlan((p) => ({ ...p, keyword_all: splitValues(e.target.value) }))} placeholder="自社開発、法人向け" /></label></div>
                   <div className="condition-input-row limit-row"><label><span>最大抽出件数</span><input type="number" min={1} max={2000000} value={plan.limit} onChange={(e) => setPlan((p) => ({ ...p, limit: Math.max(1, Math.min(2000000, Number(e.target.value) || 1)) }))} /></label><span className="condition-help">業種コードは前方一致。公式業種とAI推定は結果画面で区別して表示します。</span></div>
-                </div>
+                </div>}
                 <div className="condition-actions"><span>{filters.length ? `${filters.length}個の条件を選択中` : "条件なし（全国・全業種）"}</span><button className="primary" onClick={() => runSearch(1)} disabled={!!busy}><Search size={15} />この条件で検索</button></div>
-              </div>}
+              </div>
             </div>
 
             <div className="toolbar">
@@ -614,6 +594,25 @@ function App() {
                 </> : <div className="empty-inspector"><Building2 size={30} /><span>会社を選択</span></div>}
               </aside>
             </div>
+          </section>
+        )}
+
+        {view === "ai" && (
+          <section className="workspace ai-view">
+            <div className="section-title"><div><span className="eyebrow"><Bot size={15} /> Luna AI Search</span><h1>AI検索</h1><p className="view-subtitle">自然文で条件を相談し、構造化した条件で企業を探します。</p></div><span className="luna-badge"><Sparkles size={12} />GPT-5.6 Luna固定</span></div>
+            <div className="research-ai-card ai-page-card">
+              <div className="research-ai-head"><div><strong>探したい企業を自然文で入力</strong><small>例：「東京都の情報通信業で、従業員50名以上、Webサイトあり」</small></div></div>
+              <div className="prompt-row">
+                <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="例：東京都の情報通信業で、従業員50名以上、Webサイトあり" />
+                <button className="send" onClick={consultAndSearch} disabled={!!busy || !codex?.authenticated || !codex?.luna_available} title="Lunaで検索">
+                  {busy === "plan" ? <Loader2 className="spin" size={20} /> : <Send size={20} />}
+                </button>
+              </div>
+              <div className="ai-examples"><span>例から始める</span><button onClick={() => setPrompt("東京都の情報通信業で、従業員50名以上、Webサイトあり")}>東京のIT企業</button><button onClick={() => setPrompt("製造業で、従業員100〜500名、Webサイトあり")}>中堅メーカー</button><button onClick={() => setPrompt("法人向けSaaSを提供する会社")}>法人向けSaaS</button></div>
+              <div className="memory-row"><span className="memory-label">検索メモリー</span><select value="" onChange={(e) => { const item = savedSearches.find((v) => v.id === e.target.value); if (!item) return; setPrompt(item.query); setPlan(item.plan); setView("search"); void runSearch(1, item.plan); }}><option value="">過去の検索を呼び出す</option>{savedSearches.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><span className="muted">{savedSearches.length ? `${savedSearches.length}件` : "未保存"}</span></div>
+              <div className="ai-search-note"><Sparkles size={14} /><span>Lunaが条件をJSON化してから項目検索を実行します。検索結果は検索タブで30,000件まで高速表示できます。</span></div>
+            </div>
+            {!codex?.authenticated && <div className="ai-login-hint"><Bot size={20} /><div><strong>AI検索にはChatGPTログインが必要です</strong><span>右上のログインボタンから、このユーザー自身のアカウントで接続してください。</span></div></div>}
           </section>
         )}
 
