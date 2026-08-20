@@ -257,7 +257,10 @@ impl CodexManager {
             "model": LUNA_MODEL,
             "cwd": self.workspace_dir.to_string_lossy(),
             "approvalPolicy": "never",
-            "sandbox": "readOnly",
+            // The bundled Codex App Server accepts the hyphenated sandbox
+            // variant on thread/start.  The camelCase value produces the
+            // user-visible `unknown variant readOnly` error on Windows.
+            "sandbox": "read-only",
             "serviceName": "company_master"
         }))).await?;
         let thread_id = thread.get("thread").and_then(|v| v.get("id")).and_then(Value::as_str)

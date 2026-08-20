@@ -193,7 +193,10 @@ impl Db {
         let start = Instant::now();
         let plan = plan.normalize();
         let page = page.max(1);
-        let page_size = page_size.clamp(1, 500);
+        // The desktop UI requests up to 30,000 rows for its virtualized list.
+        // Only the visible slice is mounted in React, so this keeps the
+        // result transfer fast without creating 30,000 DOM nodes.
+        let page_size = page_size.clamp(1, 50_000);
         let where_sql = build_where(&plan);
         let conn = self.connect()?;
 
@@ -639,7 +642,7 @@ fn build_where(plan: &SearchPlan) -> String {
     if !plan.industry_codes.is_empty() {
         let terms: Vec<String> = plan.industry_codes.iter().map(|x| {
             let q = escape_like(x);
-            format!("(c.industry_code LIKE {} ESCAPE '\\\\' OR c.industry_code LIKE {} ESCAPE '\\\\' OR c.industry_code LIKE {} ESCAPE '\\\\' OR c.inferred_industry_code LIKE {} ESCAPE '\\\\' OR c.business_items LIKE {} ESCAPE '\\\\')",
+            format!("(c.industry_code LIKE {} ESCAPE '\\' OR c.industry_code LIKE {} ESCAPE '\\' OR c.industry_code LIKE {} ESCAPE '\\' OR c.inferred_industry_code LIKE {} ESCAPE '\\' OR c.business_items LIKE {} ESCAPE '\\')",
                 sql_quote(&format!("{}%", q)),
                 sql_quote(&format!("%|{}%", q)),
                 sql_quote(&format!("%{}%", q)),
@@ -671,7 +674,7 @@ fn build_where(plan: &SearchPlan) -> String {
 
 fn contains_any_columns(term: &str, columns: &[&str]) -> String {
     let pattern = sql_quote(&format!("%{}%", escape_like(term)));
-    let checks: Vec<String> = columns.iter().map(|col| format!("coalesce({col},'') ILIKE {pattern} ESCAPE '\\\\'" )).collect();
+    let checks: Vec<String> = columns.iter().map(|col| format!("coalesce({col},'') ILIKE {pattern} ESCAPE '\\'" )).collect();
     format!("({})", checks.join(" OR "))
 }
 
