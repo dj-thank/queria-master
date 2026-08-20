@@ -1,0 +1,5 @@
+# Reference profile. The app writes an equivalent private profile to its own CODEX_HOME.
+forced_login_method = "chatgpt"
+cli_auth_credentials_store = "keyring"
+web_search = "live"
+file_opener = "none"

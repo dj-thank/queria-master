@@ -4,7 +4,7 @@
 
 ## GUI
 
-通常は次を起動します。
+通常は次をダブルクリックして起動します。Desktop EXEにはTcl/Tk互換フックを組み込んでいます。
 
 ```powershell
 .\queria-master-desktop\queria-master-desktop.exe

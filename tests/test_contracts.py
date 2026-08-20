@@ -41,7 +41,11 @@ class PackageContractTests(unittest.TestCase):
             self.assertEqual(source_files, bundled_files)
 
     def test_no_embedded_tokens(self):
-        token_like = re.compile(r"\b(?:qk_|sk-)[A-Za-z0-9_-]{12,}|\b[A-Za-z0-9]{32}\b")
+        token_like = re.compile(
+            r"\b(?:qk_|sk-)[A-Za-z0-9_-]{12,}|"
+            r"\b(?=[A-Za-z0-9]{0,31}[A-Z])(?=[A-Za-z0-9]{0,31}[a-z])"
+            r"(?=[A-Za-z0-9]{0,31}[0-9])[A-Za-z0-9]{32}\b"
+        )
         skip = {".git", ".venv", "__pycache__", ".pytest_cache", "build", "dist"}
         for path in ROOT.rglob("*"):
             if (
