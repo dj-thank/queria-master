@@ -10,6 +10,9 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
+    defaults:
+      run:
+        working-directory: company_scout
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -31,8 +34,8 @@ jobs:
       - name: Upload Windows installers
         uses: actions/upload-artifact@v4
         with:
-          name: CompanyScout-Windows
+          name: CompanyMaster-Windows
           path: |
-            src-tauri/target/release/bundle/**/*.exe
-            src-tauri/target/release/bundle/**/*.msi
+            company_scout/src-tauri/target/release/bundle/**/*.exe
+            company_scout/src-tauri/target/release/bundle/**/*.msi
           if-no-files-found: error
