@@ -76,10 +76,25 @@ jobs:
               else:
                   shutil.copy2(item, destination)
           '@ | python -
+          @'
+          from pathlib import Path
+
+          path = Path("scripts/apply_public_enrichment_ui.py")
+          text = path.read_text(encoding="utf-8")
+          old = 'replace_once(enricher, \'    sheet_name: str = "企業DB",\', \'    sheet_name: str = "",\')\nreplace_once(enricher, \'    sheet_name: str = "企業DB",\', \'    sheet_name: str = "",\')'
+          new = 'sheet_text = enricher.read_text(encoding="utf-8")\nsheet_needle = \'    sheet_name: str = "企業DB",\'\nif sheet_text.count(sheet_needle) != 2:\n    raise RuntimeError(f"expected exactly two default sheet declarations: found {sheet_text.count(sheet_needle)}")\nenricher.write_text(sheet_text.replace(sheet_needle, \'    sheet_name: str = "",\'), encoding="utf-8")'
+          if text.count(old) != 1:
+              raise RuntimeError(f"unexpected patch-script sheet block count: {text.count(old)}")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+          '@ | python -
           python scripts/apply_public_enrichment_ui.py
           Remove-Item scripts/apply_public_enrichment_ui.py
           Remove-Item .integration -Recurse -Force
           cargo fmt --manifest-path src-tauri/Cargo.toml --all
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: python -m pip install -r public_enrichment/requirements.txt
 
       - name: Python tests
         shell: pwsh
