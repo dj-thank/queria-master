@@ -168,6 +168,7 @@ jobs:
             "company_scout/.integration/bundle.part-00"
             "company_scout/.integration/bundle.part-01"
             "company_scout/.integration/ready"
+            "company_scout/package-lock.json"
             "company_scout/public_enrichment/README.md"
             "company_scout/public_enrichment/prepare_windows.cmd"
             "company_scout/public_enrichment/public_data_enricher.py"
@@ -176,6 +177,7 @@ jobs:
             "company_scout/src/api.ts"
             "company_scout/src/styles.css"
             "company_scout/src/types.ts"
+            "company_scout/src-tauri/Cargo.lock"
             "company_scout/src-tauri/src/lib.rs"
             "company_scout/src-tauri/src/public_enrichment.rs"
             "company_scout/src-tauri/tauri.conf.json"
@@ -185,6 +187,8 @@ jobs:
             "company_scout/.integration/bundle.part-00"
             "company_scout/.integration/bundle.part-01"
             "company_scout/.integration/ready"
+            "company_scout/package-lock.json"
+            "company_scout/src-tauri/Cargo.lock"
             "company_scout/src-tauri/src/public_enrichment.rs"
           )
           $changedPaths = @(
