@@ -37,6 +37,7 @@ jobs:
           official_site_phone_enricher.py
           import_verified_contacts.py
           jsic39_collection.py
+          corporate_index_matcher.py
       - name: Unit tests
         working-directory: company_scout/public_enrichment
         run: python -m unittest discover -s tests -v
