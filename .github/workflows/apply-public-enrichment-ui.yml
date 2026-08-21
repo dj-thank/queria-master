@@ -101,7 +101,7 @@ jobs:
           python scripts/apply_public_enrichment_ui.py
           Remove-Item scripts/apply_public_enrichment_ui.py
           Remove-Item .integration -Recurse -Force
-          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          rustfmt --edition 2021 src-tauri/src/lib.rs src-tauri/src/public_enrichment.rs
 
       - name: Install Python dependencies
         shell: pwsh
