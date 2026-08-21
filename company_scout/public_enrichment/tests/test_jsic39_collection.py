@@ -97,21 +97,21 @@ class Jsic39CollectionTest(unittest.TestCase):
         self.assertEqual(result["companies_with_web"], 2)
         self.assertEqual(result["selected"], 1)
         self.assertEqual(result["integrity"], "ok")
-        con = sqlite3.connect(database)
+        connection = sqlite3.connect(database)
         try:
-            row = con.execute(
+            row = connection.execute(
                 "SELECT c.company_name,m.corporate_number,p.website_url "
                 "FROM companies c JOIN corporate_matches m USING(source_id) "
                 "JOIN public_master p USING(corporate_number)"
             ).fetchone()
         finally:
-            con.close()
+            connection.close()
         self.assertEqual(row, ("Beta Systems", "1000000000002", "https://beta.example"))
         manifest_rows = module.read_csv(manifest)
         self.assertEqual(manifest_rows[0]["法人番号"], "1000000000002")
         self.assertEqual(json.loads(summary.read_text(encoding="utf-8"))["integrity"], "ok")
 
-    def test_merge_marks_found_processed_and_missing(self) -> None:
+    def test_merge_preserves_multiple_candidates_and_progress_states(self) -> None:
         manifest = self.root / "manifest.csv"
         module.write_csv(
             manifest,
@@ -121,16 +121,40 @@ class Jsic39CollectionTest(unittest.TestCase):
         phones = self.root / "phones.csv"
         module.write_csv(
             phones,
-            ["法人番号", "電話番号", "根拠URL", "根拠テキスト", "信頼度", "取得日時"],
+            [
+                "法人番号",
+                "候補順位",
+                "電話番号",
+                "電話種別候補",
+                "根拠URL",
+                "根拠テキスト",
+                "抽出方法",
+                "信頼度",
+                "取得日時",
+            ],
             [
                 {
                     "法人番号": "1000000000001",
+                    "候補順位": "1",
                     "電話番号": "03-1234-5678",
+                    "電話種別候補": "代表電話",
                     "根拠URL": "https://alpha.example/company",
-                    "根拠テキスト": "代表電話",
+                    "根拠テキスト": "会社概要 代表電話",
+                    "抽出方法": "text",
                     "信頼度": "0.95",
                     "取得日時": "2026-08-21T00:00:00Z",
-                }
+                },
+                {
+                    "法人番号": "1000000000001",
+                    "候補順位": "2",
+                    "電話番号": "0120-000-001",
+                    "電話種別候補": "問い合わせ電話",
+                    "根拠URL": "https://alpha.example/contact",
+                    "根拠テキスト": "サービスのお問い合わせ",
+                    "抽出方法": "text",
+                    "信頼度": "0.75",
+                    "取得日時": "2026-08-21T00:00:01Z",
+                },
             ],
         )
         output = self.root / "output.csv"
@@ -145,12 +169,18 @@ class Jsic39CollectionTest(unittest.TestCase):
         self.assertEqual(result["companies"], 3)
         self.assertEqual(result["companies_with_web"], 2)
         self.assertEqual(result["processed_for_phone"], 2)
-        self.assertEqual(result["phone_candidates_found"], 1)
+        self.assertEqual(result["companies_with_phone_candidates"], 1)
+        self.assertEqual(result["phone_candidates_total"], 2)
         rows = {row["法人番号"]: row for row in module.read_csv(output)}
-        self.assertEqual(rows["1000000000001"]["収集状態"], "phone_candidate_found")
+        alpha = rows["1000000000001"]
+        self.assertEqual(alpha["収集状態"], "phone_candidate_found")
+        self.assertEqual(alpha["電話番号数字"], "0312345678")
+        self.assertEqual(alpha["電話種別候補"], "代表電話")
+        self.assertEqual(alpha["電話候補件数"], "2")
+        payload = json.loads(alpha["電話候補一覧JSON"])
+        self.assertEqual([item["phone_digits"] for item in payload], ["0312345678", "0120000001"])
         self.assertEqual(rows["1000000000002"]["収集状態"], "processed_no_phone")
         self.assertEqual(rows["1000000000003"]["収集状態"], "website_missing")
-        self.assertEqual(rows["1000000000001"]["電話番号数字"], "0312345678")
 
 
 if __name__ == "__main__":
