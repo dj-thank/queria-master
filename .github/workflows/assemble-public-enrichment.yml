@@ -74,11 +74,6 @@ jobs:
                   shutil.copytree(item, destination)
               else:
                   shutil.copy2(item, destination)
-
-          workflow = extract_root / ".github/workflows/public-enrichment-tests.yml"
-          workflow_target = repo / ".github/workflows/public-enrichment-tests.yml"
-          workflow_target.parent.mkdir(parents=True, exist_ok=True)
-          shutil.copy2(workflow, workflow_target)
           PY
 
           rm -rf company_scout/public_enrichment/.assembly
