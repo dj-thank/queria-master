@@ -1,0 +1,178 @@
+name: JSIC 39 official contact collection
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_offset:
+        description: Start position within prioritized companies that have an official URL
+        required: false
+        default: "0"
+      batch_size:
+        description: Companies per shard
+        required: false
+        default: "100"
+      max_pages:
+        description: Maximum same-host pages per company
+        required: false
+        default: "4"
+  pull_request:
+    paths:
+      - ".github/workflows/jsic39-contact-collection.yml"
+      - "company_scout/public_enrichment/jsic39_collection.py"
+      - "company_scout/public_enrichment/official_site_phone_enricher.py"
+      - "company_scout/public_enrichment/tests/test_jsic39_collection.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jsic39-contact-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  START_OFFSET: ${{ github.event.inputs.start_offset || '0' }}
+  BATCH_SIZE: ${{ github.event.inputs.batch_size || '100' }}
+  MAX_PAGES: ${{ github.event.inputs.max_pages || '4' }}
+
+jobs:
+  build-public-index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install Queria Master
+        run: python -m pip install -e .
+      - name: Build current information-and-communications public database
+        run: python -m queria_master refresh --scope info-communications --no-cache
+      - name: Export JSIC middle-code 39 companies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p collection
+          python -m queria_master --db data/queria_master.duckdb search \
+            --industry-middle 39 \
+            --limit 100000 \
+            --out collection/jsic39_all.csv
+          python -m queria_master --db data/queria_master.duckdb search \
+            --industry-middle 39 \
+            --has-web \
+            --limit 100000 \
+            --out collection/jsic39_with_web.csv
+          python - <<'PY'
+          import csv
+          import json
+          from pathlib import Path
+
+          def count(path: str) -> int:
+              with Path(path).open(encoding="utf-8-sig", newline="") as handle:
+                  return sum(1 for _ in csv.DictReader(handle))
+
+          summary = {
+              "jsic_middle_code": "39",
+              "companies": count("collection/jsic39_all.csv"),
+              "companies_with_public_url": count("collection/jsic39_with_web.csv"),
+          }
+          Path("collection/export_summary.json").write_text(
+              json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsic39-public-index
+          path: collection/*
+          if-no-files-found: error
+          retention-days: 30
+
+  crawl-official-sites:
+    needs: build-public-index
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install crawler dependencies
+        working-directory: company_scout/public_enrichment
+        run: python -m pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: jsic39-public-index
+          path: collection
+      - name: Prepare prioritized shard and collect phone candidates
+        shell: bash
+        working-directory: company_scout/public_enrichment
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          OFFSET=$((START_OFFSET + SHARD * BATCH_SIZE))
+          WORK="work/shard-${SHARD}"
+          mkdir -p "$WORK"
+          python jsic39_collection.py prepare-shard \
+            --companies ../../../collection/jsic39_with_web.csv \
+            --db "$WORK/targets.sqlite3" \
+            --manifest "$WORK/manifest.csv" \
+            --summary "$WORK/prepare_summary.json" \
+            --offset "$OFFSET" \
+            --limit "$BATCH_SIZE"
+          python official_site_phone_enricher.py \
+            --db "$WORK/targets.sqlite3" \
+            --output "$WORK/phones.csv" \
+            --max-pages "$MAX_PAGES" \
+            --sleep 0.75 \
+            --timeout 20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsic39-phone-${{ matrix.shard }}
+          path: company_scout/public_enrichment/work/shard-${{ matrix.shard }}/*
+          if-no-files-found: error
+          retention-days: 30
+
+  merge-batch:
+    needs: [build-public-index, crawl-official-sites]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: jsic39-public-index
+          path: collection
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jsic39-phone-*
+          path: batches
+      - name: Merge the public index and phone evidence
+        shell: bash
+        working-directory: company_scout/public_enrichment
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          python jsic39_collection.py merge \
+            --all-companies ../../../collection/jsic39_all.csv \
+            --manifest '../../../batches/**/manifest.csv' \
+            --phones '../../../batches/**/phones.csv' \
+            --output output/jsic39_public_contacts.csv \
+            --summary output/jsic39_collection_summary.json
+          cp ../../../collection/export_summary.json output/export_summary.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsic39-contact-batch
+          path: company_scout/public_enrichment/output/*
+          if-no-files-found: error
+          retention-days: 30
