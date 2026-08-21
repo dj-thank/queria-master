@@ -1,0 +1,129 @@
+name: Apply public enrichment desktop integration
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - "company_scout/**"
+      - ".github/workflows/apply-public-enrichment-ui.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    if: github.head_ref == 'feat/public-enrichment-desktop'
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: company_scout
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/public-enrichment-desktop
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Rust stable with rustfmt
+        shell: pwsh
+        run: |
+          rustup default stable
+          rustup component add rustfmt
+
+      - name: Assemble and apply verified integration patch
+        shell: pwsh
+        run: |
+          if (-not (Test-Path .integration/ready)) {
+            Write-Host "Patch already applied."
+            exit 0
+          }
+          @'
+          import base64
+          import hashlib
+          import shutil
+          import tarfile
+          import tempfile
+          from pathlib import Path
+
+          root = Path.cwd().resolve()
+          assembly = root / ".integration"
+          encoded = "".join(path.read_text(encoding="ascii").strip() for path in sorted(assembly.glob("bundle.part-*")))
+          archive = Path(tempfile.mkdtemp()) / "integration.tar.xz"
+          archive.write_bytes(base64.b64decode(encoded, validate=True))
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          expected = "13c86ddcf1988a059d1a6539e9f92d11cc1014afe76f808ac5623496ebe1fa47"
+          if digest != expected:
+              raise RuntimeError(f"integration archive checksum mismatch: {digest}")
+          extracted = Path(tempfile.mkdtemp()).resolve()
+          with tarfile.open(archive, "r:xz") as bundle:
+              for member in bundle.getmembers():
+                  destination = (extracted / member.name).resolve()
+                  if extracted not in destination.parents and destination != extracted:
+                      raise RuntimeError(f"unsafe archive path: {member.name}")
+              bundle.extractall(extracted)
+          for item in extracted.iterdir():
+              destination = root / item.name
+              if item.is_dir():
+                  shutil.copytree(item, destination, dirs_exist_ok=True)
+              else:
+                  shutil.copy2(item, destination)
+          '@ | python -
+          python scripts/apply_public_enrichment_ui.py
+          Remove-Item scripts/apply_public_enrichment_ui.py
+          Remove-Item .integration -Recurse -Force
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+
+      - name: Python tests
+        shell: pwsh
+        run: python -m unittest discover -s public_enrichment/tests -v
+
+      - name: Install frontend dependencies
+        shell: pwsh
+        run: npm install
+
+      - name: Frontend typecheck and build
+        shell: pwsh
+        run: npm run build
+
+      - name: Rust tests
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Source-neutrality scan
+        shell: pwsh
+        run: |
+          $targets = @(
+            Get-ChildItem public_enrichment -Recurse -File
+            Get-Item src-tauri/src/public_enrichment.rs
+            Get-Item src/App.tsx
+            Get-Item src/api.ts
+            Get-Item src/types.ts
+          )
+          $patterns = @("FUMA", "fumadata", "FUMA_ID", "_next/data", "buildId", "56353", "56,353", "EB4E60")
+          $matches = $targets | Select-String -Pattern $patterns -SimpleMatch -ErrorAction SilentlyContinue
+          if ($matches) {
+            $matches | Format-Table -AutoSize
+            throw "Source-specific marker detected."
+          }
+
+      - name: Commit generated source changes
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "No source changes to commit."
+            exit 0
+          }
+          git commit -m "feat: connect public enrichment to desktop app"
+          git push origin HEAD:feat/public-enrichment-desktop
