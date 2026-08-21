@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import importlib.util
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
-import import_verified_contacts as module
+MODULE_PATH = Path(__file__).resolve().parents[1] / "import_verified_contacts.py"
+SPEC = importlib.util.spec_from_file_location("import_verified_contacts", MODULE_PATH)
+assert SPEC and SPEC.loader
+module = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(module)
 
 
 class ImportVerifiedContactsTest(unittest.TestCase):
