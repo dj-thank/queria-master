@@ -6,7 +6,7 @@ on:
       - hardening/public-enrichment-v1.1
     paths:
       - .github/workflows/assemble-public-enrichment.yml
-      - company_scout/public_enrichment/.assembly/bundle.b64
+      - company_scout/public_enrichment/.assembly/ready
 
 permissions:
   contents: write
@@ -20,13 +20,13 @@ jobs:
           ref: hardening/public-enrichment-v1.1
           fetch-depth: 0
 
-      - name: Assemble files when bundle exists
+      - name: Assemble files when all bundle parts are ready
         shell: bash
         run: |
           set -euo pipefail
-          BUNDLE="company_scout/public_enrichment/.assembly/bundle.b64"
-          if [[ ! -f "$BUNDLE" ]]; then
-            echo "Bundle not present yet; nothing to assemble."
+          ASSEMBLY="company_scout/public_enrichment/.assembly"
+          if [[ ! -f "$ASSEMBLY/ready" ]]; then
+            echo "Bundle is not marked ready; nothing to assemble."
             exit 0
           fi
 
@@ -38,12 +38,16 @@ jobs:
           from pathlib import Path
 
           repo = Path.cwd().resolve()
-          bundle = repo / "company_scout/public_enrichment/.assembly/bundle.b64"
-          archive = Path(tempfile.mkdtemp()) / "bundle.tar.gz"
-          archive.write_bytes(base64.b64decode(bundle.read_text(encoding="ascii"), validate=True))
+          assembly = repo / "company_scout/public_enrichment/.assembly"
+          parts = sorted(assembly.glob("bundle.part-*"))
+          if not parts:
+              raise RuntimeError("bundle parts are missing")
+          encoded = "".join(part.read_text(encoding="ascii").strip() for part in parts)
+          archive = Path(tempfile.mkdtemp()) / "bundle.tar.xz"
+          archive.write_bytes(base64.b64decode(encoded, validate=True))
           extract_root = Path(tempfile.mkdtemp()).resolve()
 
-          with tarfile.open(archive, "r:gz") as tf:
+          with tarfile.open(archive, "r:xz") as tf:
               for member in tf.getmembers():
                   destination = (extract_root / member.name).resolve()
                   if extract_root not in destination.parents and destination != extract_root:
