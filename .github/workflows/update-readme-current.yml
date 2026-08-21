@@ -1,0 +1,117 @@
+name: Update README to current architecture
+
+on:
+  push:
+    branches:
+      - docs/readme-current-20260821
+    paths:
+      - .github/workflows/update-readme-current.yml
+
+permissions:
+  contents: write
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: docs/readme-current-20260821
+          fetch-depth: 0
+
+      - name: Patch root README and remove obsolete source-specific note
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("README.md")
+          text = path.read_text(encoding="utf-8")
+
+          replacements = [
+              (
+                  "## 0.9: 設定と実装の生存性\n\n0.9ではcanonical DB、enrichment DB、runtime DB、検索索引を別の役割として解決します。検索系はruntime、更新系はcanonicalを既定にし、runtime/indexは`generation_id`が一致する場合だけ開きます。",
+                  "## 現在の運用構成\n\ncanonical DB、enrichment DB、runtime DB、検索索引を役割ごとに分離しています。検索系はruntime、更新系はcanonicalを既定にし、runtime/indexは`generation_id`が一致する場合だけ開きます。",
+              ),
+              (
+                  "ブラウザスクレイピングや FUMA の非公開 API 解析は行いません。Queria 公式 CLI で公開 DuckLake を安全に読み、\n結果を Parquet に書き出した後、DuckDB 純正エンジンで `data/queria_master.duckdb` を構築します。",
+                  "非公開APIの解析や特定の民間企業データベースには依存しません。Queria 公式 CLI で公開 DuckLake を安全に読み、\n結果を Parquet に書き出した後、DuckDB 純正エンジンで `data/queria_master.duckdb` を構築します。",
+              ),
+              (
+                  "したがって、FUMA の独自収集・推定による件数と完全一致することは保証できません。",
+                  "したがって、民間データベースや独自推定による件数と完全一致することは保証できません。",
+              ),
+              (
+                  "FUMA/FDS の正規 CSV を取得した場合は法人番号をキーに追加結合できますが、このプロジェクトは FUMA の画面や非公開 API を取得しません。\n\nまた、Queria/gBizINFO の公開項目には電話番号がありません。電話番号を必要とする場合は、利用条件を満たす別の正規データソースが必要です。",
+                  "Queria/gBizINFO の法人サマリーだけでは電話番号を十分に補えないため、電話・公式URLなどの連絡先は canonical DB へ無根拠に上書きしません。`company_scout/public_enrichment/` で、法人番号で確認した公式サイトの候補値と公式根拠付きリファレンスを、出典・用途・確認日・照合状態とともに別レイヤーへ取り込みます。",
+              ),
+              (
+                  "設計詳細は `docs/ARCHITECTURE.md`、FUMA URL の正規化メモは `docs/FUMA_URL_JSON.md` にあります。",
+                  "設計詳細は `docs/ARCHITECTURE.md`、公開企業情報の補完は `company_scout/public_enrichment/README.md`、営業向け証拠付き拡張は `docs/OUTBOUND_ENRICHMENT_RUNBOOK_JA.md` を参照してください。",
+              ),
+              (
+                  ".\\.venv\\Scripts\\python.exe scripts\\build_full_app_bundle.py `\n  --out F:\\QueriaReleases\\queria-master-0.8.0-full-app.zip",
+                  ".\\.venv\\Scripts\\python.exe scripts\\build_full_app_bundle.py `\n  --out F:\\QueriaReleases\\queria-master-full-app.zip",
+              ),
+          ]
+
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f"README expected text not found: {old[:80]!r}")
+              text = text.replace(old, new, 1)
+
+          old_benchmark = "onefile版は配布しやすい互換版、onedir版は起動速度を優先する基準版です。全量5,823,039法人で常駐検索の1,000件取得は、0.8.0基準onedir CLIビルドの実測p50 13.023msでした。今回の修正版EXEはこのホストのアプリケーション制御ポリシー（WinError 4551）で直接起動できないため、最新ビルドのEXE合格とは混同せず、現行Python常駐経路はp50 14.398msとして別記録しています。0.5秒という数値は、検索・EXE起動・IPC・1000行のGUI反映・初回描画・CSV出力を分けて測定し、実測値として報告します。DBと索引の配置を自動検出できない場合は `QUERIA_MASTER_HOME` にデータの親ディレクトリを指定してください。"
+          new_benchmark = "onefile版は配布しやすい互換版、onedir版は起動速度を優先する基準版です。性能値はビルド・DB世代・キャッシュ状態で変わるため、READMEには固定の過去ベンチマークを基準値として置きません。最新の測定方法と結果は `docs/SEARCH_PERFORMANCE.md` と監査JSONを参照してください。DBと索引の配置を自動検出できない場合は `QUERIA_MASTER_HOME` にデータの親ディレクトリを指定してください。"
+          if old_benchmark not in text:
+              raise SystemExit("historical benchmark paragraph not found")
+          text = text.replace(old_benchmark, new_benchmark, 1)
+
+          anchor = "Desktop版には［設定・診断］を追加しました。DB/index不整合時も設定画面を開け、検証後に保存・即時反映できます。詳細は `docs/V090_OPERATIONAL_ARCHITECTURE_JA.md` を参照してください。\n"
+          section = r'''
+
+## 公開企業情報の補完（Public Company Enrichment v1.1.0）
+
+`company_scout/public_enrichment/` には、任意の企業CSV / XLSXを政府公開データ・EDINET・企業公式Webサイトで補完する独立パイプラインがあります。入力元の列を保持し、法人番号候補、公開値、出典、照合品質、要確認理由をローカルSQLiteへ分離して保存します。
+
+Windowsでは次の4コマンドが最短経路です。
+
+```text
+setup_windows.cmd
+prepare_windows.cmd companies.csv
+integrate_windows.cmd
+status_windows.cmd
+```
+
+主な機能:
+
+- 高確度の法人番号だけを自動採用し、競合はレビューへ戻す
+- 法人番号確定済み企業だけへ基本・財務・職場情報を結合
+- EDINET XBRLから平均年齢・平均年間給与を抽出
+- SSRF対策、同一ホスト制約、robots.txt、受信上限付きで公式サイトの電話番号候補を収集
+- `reference/verified_public_contacts.csv` の公式根拠付き連絡先を、電話種別・用途・根拠URL・確認日とともに反映
+- 入力企業リスト、生成DB、取得キャッシュ、APIキーはGitへ保存しない
+
+CIは Python 3.11 / 3.12 / 3.13 で構文チェックとオフラインテストを実行します。詳細は [`company_scout/public_enrichment/README.md`](company_scout/public_enrichment/README.md) と [`company_scout/public_enrichment/SECURITY.md`](company_scout/public_enrichment/SECURITY.md) を参照してください。
+'''
+          if anchor not in text:
+              raise SystemExit("README insertion anchor not found")
+          text = text.replace(anchor, anchor + section, 1)
+
+          prohibited = ["FUMA", "fumadata.com", "FUMA_ID", "_next/data"]
+          hits = [marker for marker in prohibited if marker in text]
+          if hits:
+              raise SystemExit(f"source-specific markers remain in README: {hits}")
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          rm -f docs/FUMA_URL_JSON.md
+          rm -f .github/workflows/update-readme-current.yml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "docs: align README with current public enrichment"
+          git push origin HEAD:docs/readme-current-20260821
