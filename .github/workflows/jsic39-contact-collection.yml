@@ -121,7 +121,7 @@ jobs:
           WORK="work/shard-${SHARD}"
           mkdir -p "$WORK"
           python jsic39_collection.py prepare-shard \
-            --companies ../../../collection/jsic39_with_web.csv \
+            --companies ../../collection/jsic39_with_web.csv \
             --db "$WORK/targets.sqlite3" \
             --manifest "$WORK/manifest.csv" \
             --summary "$WORK/prepare_summary.json" \
@@ -164,12 +164,12 @@ jobs:
           set -euo pipefail
           mkdir -p output
           python jsic39_collection.py merge \
-            --all-companies ../../../collection/jsic39_all.csv \
-            --manifest '../../../batches/**/manifest.csv' \
-            --phones '../../../batches/**/phones.csv' \
+            --all-companies ../../collection/jsic39_all.csv \
+            --manifest '../../batches/**/manifest.csv' \
+            --phones '../../batches/**/phones.csv' \
             --output output/jsic39_public_contacts.csv \
             --summary output/jsic39_collection_summary.json
-          cp ../../../collection/export_summary.json output/export_summary.json
+          cp ../../collection/export_summary.json output/export_summary.json
       - uses: actions/upload-artifact@v4
         with:
           name: jsic39-contact-batch
