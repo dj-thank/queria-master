@@ -1,0 +1,315 @@
+name: Publish split JSIC 39 public contact data
+
+on:
+  push:
+    branches:
+      - "data/jsic39-release-*"
+    paths:
+      - "collection_requests/jsic39_release.json"
+  workflow_dispatch:
+    inputs:
+      start_offset:
+        description: Start position in the prioritized official-URL population
+        required: false
+        default: "0"
+      batch_size:
+        description: Companies per shard
+        required: false
+        default: "400"
+      max_pages:
+        description: Same-host pages per company
+        required: false
+        default: "4"
+      rows_per_zip:
+        description: Rows per public contact ZIP part
+        required: false
+        default: "5000"
+      release_tag:
+        description: GitHub Release tag
+        required: false
+        default: "jsic39-public-contacts-manual"
+
+permissions:
+  contents: write
+
+env:
+  PYTHONUNBUFFERED: "1"
+  SHARD_COUNT: "8"
+
+concurrency:
+  group: jsic39-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      start_offset: ${{ steps.config.outputs.start_offset }}
+      batch_size: ${{ steps.config.outputs.batch_size }}
+      max_pages: ${{ steps.config.outputs.max_pages }}
+      rows_per_zip: ${{ steps.config.outputs.rows_per_zip }}
+      release_tag: ${{ steps.config.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: config
+        shell: bash
+        env:
+          DISPATCH_START: ${{ github.event.inputs.start_offset }}
+          DISPATCH_BATCH: ${{ github.event.inputs.batch_size }}
+          DISPATCH_PAGES: ${{ github.event.inputs.max_pages }}
+          DISPATCH_ROWS: ${{ github.event.inputs.rows_per_zip }}
+          DISPATCH_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          request_path = Path("collection_requests/jsic39_release.json")
+          request = json.loads(request_path.read_text(encoding="utf-8")) if request_path.exists() else {}
+          values = {
+              "start_offset": os.environ.get("DISPATCH_START") or request.get("start_offset", 0),
+              "batch_size": os.environ.get("DISPATCH_BATCH") or request.get("batch_size", 400),
+              "max_pages": os.environ.get("DISPATCH_PAGES") or request.get("max_pages", 4),
+              "rows_per_zip": os.environ.get("DISPATCH_ROWS") or request.get("rows_per_zip", 5000),
+              "release_tag": os.environ.get("DISPATCH_TAG") or request.get("release_tag", "jsic39-public-contacts"),
+          }
+          for key in ("start_offset", "batch_size", "max_pages", "rows_per_zip"):
+              values[key] = int(values[key])
+          if values["start_offset"] < 0:
+              raise SystemExit("start_offset must be >= 0")
+          if not 1 <= values["batch_size"] <= 1000:
+              raise SystemExit("batch_size must be between 1 and 1000")
+          if not 1 <= values["max_pages"] <= 10:
+              raise SystemExit("max_pages must be between 1 and 10")
+          if not 100 <= values["rows_per_zip"] <= 50000:
+              raise SystemExit("rows_per_zip must be between 100 and 50000")
+          if not re.fullmatch(r"[A-Za-z0-9._-]+", str(values["release_tag"])):
+              raise SystemExit("release_tag contains unsupported characters")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for key, value in values.items():
+                  output.write(f"{key}={value}\n")
+          print(json.dumps(values, ensure_ascii=False, indent=2))
+          PY
+
+  build-public-index:
+    needs: config
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install Queria Master
+        run: python -m pip install -e .
+      - name: Build current public information-and-communications database
+        run: python -m queria_master refresh --scope info-communications --no-cache
+      - name: Export current JSIC middle-code 39 population
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p collection
+          python -m queria_master --db data/queria_master.duckdb search \
+            --industry-middle 39 \
+            --limit 100000 \
+            --out collection/jsic39_all.csv
+          python -m queria_master --db data/queria_master.duckdb search \
+            --industry-middle 39 \
+            --has-web \
+            --limit 100000 \
+            --out collection/jsic39_with_web.csv
+          python - <<'PY'
+          import csv
+          import json
+          from pathlib import Path
+
+          def count(path: str) -> int:
+              with Path(path).open(encoding="utf-8-sig", newline="") as handle:
+                  return sum(1 for _ in csv.DictReader(handle))
+
+          summary = {
+              "jsic_middle_code": "39",
+              "companies": count("collection/jsic39_all.csv"),
+              "companies_with_public_url": count("collection/jsic39_with_web.csv"),
+          }
+          Path("collection/export_summary.json").write_text(
+              json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+          )
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsic39-public-index
+          path: collection/*
+          if-no-files-found: error
+          retention-days: 30
+
+  crawl-official-sites:
+    needs: [config, build-public-index]
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install crawler dependencies
+        working-directory: company_scout/public_enrichment
+        run: python -m pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: jsic39-public-index
+          path: collection
+      - name: Crawl prioritized official sites
+        shell: bash
+        working-directory: company_scout/public_enrichment
+        env:
+          SHARD: ${{ matrix.shard }}
+          START_OFFSET: ${{ needs.config.outputs.start_offset }}
+          BATCH_SIZE: ${{ needs.config.outputs.batch_size }}
+          MAX_PAGES: ${{ needs.config.outputs.max_pages }}
+        run: |
+          set -euo pipefail
+          OFFSET=$((START_OFFSET + SHARD * BATCH_SIZE))
+          WORK="work/shard-${SHARD}"
+          mkdir -p "$WORK"
+          python jsic39_collection.py prepare-shard \
+            --companies ../../collection/jsic39_with_web.csv \
+            --db "$WORK/targets.sqlite3" \
+            --manifest "$WORK/manifest.csv" \
+            --summary "$WORK/prepare_summary.json" \
+            --offset "$OFFSET" \
+            --limit "$BATCH_SIZE"
+          python official_site_phone_enricher.py \
+            --db "$WORK/targets.sqlite3" \
+            --output "$WORK/phones.csv" \
+            --max-pages "$MAX_PAGES" \
+            --max-candidates 5 \
+            --sleep 0.75 \
+            --timeout 20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsic39-phone-${{ matrix.shard }}
+          path: |
+            company_scout/public_enrichment/work/shard-${{ matrix.shard }}/manifest.csv
+            company_scout/public_enrichment/work/shard-${{ matrix.shard }}/phones.csv
+            company_scout/public_enrichment/work/shard-${{ matrix.shard }}/prepare_summary.json
+          if-no-files-found: error
+          retention-days: 30
+
+  merge-batch:
+    needs: [config, build-public-index, crawl-official-sites]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: jsic39-public-index
+          path: collection
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jsic39-phone-*
+          path: batches
+      - name: Merge public population and phone evidence
+        shell: bash
+        working-directory: company_scout/public_enrichment
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          python jsic39_collection.py merge \
+            --all-companies ../../collection/jsic39_all.csv \
+            --manifest '../../batches/**/manifest.csv' \
+            --phones '../../batches/**/phones.csv' \
+            --output output/jsic39_public_contacts.csv \
+            --summary output/jsic39_collection_summary.json
+          cp ../../collection/export_summary.json output/export_summary.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsic39-contact-batch
+          path: company_scout/public_enrichment/output/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-release:
+    needs: [config, merge-batch]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.config.outputs.release_tag }}
+      START_OFFSET: ${{ needs.config.outputs.start_offset }}
+      BATCH_SIZE: ${{ needs.config.outputs.batch_size }}
+      ROWS_PER_ZIP: ${{ needs.config.outputs.rows_per_zip }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: jsic39-contact-batch
+          path: merged
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jsic39-phone-*
+          path: evidence
+      - name: Build split ZIP assets and audit manifest
+        shell: bash
+        working-directory: company_scout/public_enrichment
+        run: |
+          set -euo pipefail
+          rm -rf release-assets
+          python package_jsic39_release.py \
+            --contacts ../../merged/jsic39_public_contacts.csv \
+            --collection-summary ../../merged/jsic39_collection_summary.json \
+            --export-summary ../../merged/export_summary.json \
+            --evidence-root ../../evidence \
+            --output-dir release-assets \
+            --rows-per-part "$ROWS_PER_ZIP" \
+            --batch-start "$START_OFFSET" \
+            --batch-size "$BATCH_SIZE" \
+            --shard-count "$SHARD_COUNT" \
+            --release-tag "$RELEASE_TAG" \
+            --verified-reference reference/verified_public_contacts.csv \
+            --verified-readme reference/README.md
+          grep -RilE 'fumadata\.com|FUMA_ID|/_next/data/|buildId' release-assets && exit 1 || true
+      - name: Publish GitHub Release assets
+        shell: bash
+        working-directory: company_scout/public_enrichment
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "JSIC 39 public contacts — $RELEASE_TAG" \
+              --notes-file release-assets/README.md
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "JSIC 39 public contacts — $RELEASE_TAG" \
+              --notes-file release-assets/README.md \
+              --latest=false
+          fi
+          gh release upload "$RELEASE_TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jsic39-release-assets
+          path: company_scout/public_enrichment/release-assets/*
+          if-no-files-found: error
+          retention-days: 30
