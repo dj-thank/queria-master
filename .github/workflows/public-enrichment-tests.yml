@@ -30,7 +30,13 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Compile
         working-directory: company_scout/public_enrichment
-        run: python -m py_compile public_data_enricher.py edinet_salary_enricher.py official_site_phone_enricher.py
+        run: >-
+          python -m py_compile
+          public_data_enricher.py
+          edinet_salary_enricher.py
+          official_site_phone_enricher.py
+          import_verified_contacts.py
+          jsic39_collection.py
       - name: Unit tests
         working-directory: company_scout/public_enrichment
         run: python -m unittest discover -s tests -v
