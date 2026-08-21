@@ -6,6 +6,13 @@ on:
       - "data/jsic39-release-*"
     paths:
       - "collection_requests/jsic39_release.json"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "collection_requests/jsic39_release.json"
+      - ".github/workflows/jsic39-publish-release.yml"
+      - "company_scout/public_enrichment/package_jsic39_release.py"
   workflow_dispatch:
     inputs:
       start_offset:
@@ -37,8 +44,8 @@ env:
   SHARD_COUNT: "8"
 
 concurrency:
-  group: jsic39-release-${{ github.ref }}
-  cancel-in-progress: false
+  group: jsic39-release-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   config:
@@ -253,6 +260,7 @@ jobs:
       START_OFFSET: ${{ needs.config.outputs.start_offset }}
       BATCH_SIZE: ${{ needs.config.outputs.batch_size }}
       ROWS_PER_ZIP: ${{ needs.config.outputs.rows_per_zip }}
+      TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -299,7 +307,7 @@ jobs:
           else
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
+              --target "$TARGET_SHA" \
               --title "JSIC 39 public contacts — $RELEASE_TAG" \
               --notes-file release-assets/README.md \
               --latest=false
