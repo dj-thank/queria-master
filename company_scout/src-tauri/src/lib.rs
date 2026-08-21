@@ -8,9 +8,11 @@ use codex::CodexManager;
 use db::Db;
 use models::{CodexStatus, Company, DataStatus, ResearchReport, SalesforceStatus, SavedSearch, SearchPlan, SearchResult};
 use salesforce::SalesforceManager;
+use anyhow::Context;
 use serde::Serialize;
 use regex::Regex;
-use std::path::PathBuf;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 use tauri::{Manager, State};
 use url::Url;
 
@@ -48,9 +50,53 @@ fn find_runtime_db() -> Option<PathBuf> {
         }
     }
     if let Ok(current_dir) = std::env::current_dir() {
-        candidates.push(current_dir.join("data/queria_runtime.duckdb"));
+        // `tauri dev` can start from either company_scout/ or src-tauri/.
+        // Check only the nearby project roots rather than walking arbitrary
+        // ancestors, while release builds continue to prefer bundled paths.
+        candidates.extend(
+            current_dir
+                .ancestors()
+                .take(3)
+                .map(|root| root.join("data/queria_runtime.duckdb")),
+        );
     }
     candidates.into_iter().find(|path| path.is_file())
+}
+
+fn find_search_index(runtime_path: Option<&Path>) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(path) = std::env::var("QUERIA_SEARCH_INDEX") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(home) = std::env::var("QUERIA_MASTER_HOME") {
+        candidates.push(PathBuf::from(home).join("data/search.sqlite"));
+    }
+    if let Some(parent) = runtime_path.and_then(Path::parent) {
+        candidates.push(parent.join("search.sqlite"));
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(parent) = executable.parent() {
+            candidates.push(parent.join("data/search.sqlite"));
+            if let Some(release_root) = parent.parent() {
+                candidates.push(release_root.join("data/search.sqlite"));
+            }
+        }
+    }
+    if let Ok(current_dir) = std::env::current_dir() {
+        candidates.extend(
+            current_dir
+                .ancestors()
+                .take(3)
+                .map(|root| root.join("data/search.sqlite")),
+        );
+    }
+    candidates.into_iter().find_map(|path| {
+        if path.is_file() {
+            path.canonicalize().ok()
+        } else {
+            None
+        }
+    })
 }
 
 #[tauri::command]
@@ -140,26 +186,8 @@ async fn codex_research_company(state: State<'_, AppState>, company: Company, in
 async fn collect_company_phone(state: State<'_, AppState>, company: Company) -> Result<PhoneCollectionResult, String> {
     let website = company.website.clone().ok_or_else(|| "この会社には公式サイトURLがありません".to_string())?;
     let parsed = Url::parse(&website).map_err(err)?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-        return Err("公式サイトURLが不正です".to_string());
-    }
-    let client = reqwest::Client::builder()
-        .user_agent("CompanyMaster/0.2 contact-enrichment")
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(err)?;
-    let response = client.get(parsed.clone()).send().await.map_err(err)?;
-    if !response.status().is_success() {
-        return Err(format!("公式サイトの取得に失敗しました: {}", response.status()));
-    }
-    if response.content_length().unwrap_or(0) > 8_000_000 {
-        return Err("公式サイトが大きすぎるため電話番号調査を中止しました".to_string());
-    }
-    let source_url = response.url().to_string();
-    let body = response.bytes().await.map_err(err)?;
-    if body.len() > 8_000_000 {
-        return Err("公式サイトが大きすぎるため電話番号調査を中止しました".to_string());
-    }
+    let (final_url, body) = fetch_public_html(parsed).await.map_err(err)?;
+    let source_url = final_url.to_string();
     let html = String::from_utf8_lossy(&body);
     let phone = extract_phone(&html);
     if let Some(phone_value) = &phone {
@@ -237,10 +265,13 @@ pub fn run() {
             let app_data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data_dir)?;
             let db_path = app_data_dir.join("company-master.duckdb");
-            let db = match find_runtime_db() {
+            let runtime_path = find_runtime_db();
+            let search_index_path = find_search_index(runtime_path.as_deref());
+            let db = match runtime_path {
                 Some(runtime_path) => Db::with_runtime(db_path, runtime_path),
                 None => Db::new(db_path),
-            };
+            }
+            .with_search_index(search_index_path);
             db.init().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
             // A pinned native Codex runtime is bundled with Windows releases. Copy it to app data
@@ -274,6 +305,215 @@ pub fn run() {
         .expect("error while running CompanyMaster");
 }
 
+const MAX_PHONE_PAGE_BYTES: usize = 8_000_000;
+const MAX_PHONE_REDIRECTS: usize = 5;
+
+#[derive(Debug)]
+struct ResolvedPublicTarget {
+    host: Option<String>,
+    addresses: Vec<SocketAddr>,
+}
+
+async fn fetch_public_html(mut url: Url) -> anyhow::Result<(Url, Vec<u8>)> {
+    for redirect_count in 0..=MAX_PHONE_REDIRECTS {
+        let target = resolve_public_target(&url).await?;
+        let mut builder = reqwest::Client::builder()
+            .user_agent("CompanyMaster/0.2 contact-enrichment")
+            .timeout(std::time::Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if let Some(host) = target.host.as_deref() {
+            if url.host_str() != Some(host) {
+                url.set_host(Some(host))
+                    .map_err(|_| anyhow::anyhow!("公式サイトのホスト名を正規化できません"))?;
+            }
+            builder = builder.resolve_to_addrs(host, &target.addresses);
+        }
+        let client = builder.build()?;
+        let mut response = client.get(url.clone()).send().await?;
+
+        if response.status().is_redirection() {
+            if redirect_count == MAX_PHONE_REDIRECTS {
+                return Err(anyhow::anyhow!("公式サイトのリダイレクト回数が多すぎます"));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .context("公式サイトのリダイレクト先がありません")?
+                .to_str()
+                .context("公式サイトのリダイレクト先が不正です")?;
+            let next = url.join(location).context("公式サイトのリダイレクト先URLが不正です")?;
+            if url.scheme() == "https" && next.scheme() != "https" {
+                return Err(anyhow::anyhow!(
+                    "HTTPSから安全でないURLへのリダイレクトを拒否しました"
+                ));
+            }
+            url = next;
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "公式サイトの取得に失敗しました: {}",
+                response.status()
+            ));
+        }
+        if response.content_length().unwrap_or(0) > MAX_PHONE_PAGE_BYTES as u64 {
+            return Err(anyhow::anyhow!(
+                "公式サイトが大きすぎるため電話番号調査を中止しました"
+            ));
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_ascii_lowercase);
+        if content_type.as_deref().is_some_and(|value| {
+            !value.starts_with("text/html") && !value.starts_with("application/xhtml+xml")
+        }) {
+            return Err(anyhow::anyhow!("公式サイトの応答がHTMLではありません"));
+        }
+
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if body.len().saturating_add(chunk.len()) > MAX_PHONE_PAGE_BYTES {
+                return Err(anyhow::anyhow!(
+                    "公式サイトが大きすぎるため電話番号調査を中止しました"
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        if content_type.is_none() && !looks_like_html(&body) {
+            return Err(anyhow::anyhow!("公式サイトの応答がHTMLではありません"));
+        }
+        return Ok((url, body));
+    }
+    unreachable!("redirect loop always returns or continues within the bound")
+}
+
+async fn resolve_public_target(url: &Url) -> anyhow::Result<ResolvedPublicTarget> {
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(anyhow::anyhow!("公式サイトURLはHTTPまたはHTTPSで指定してください"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(anyhow::anyhow!("認証情報を含む公式サイトURLは使用できません"));
+    }
+    let port = url
+        .port_or_known_default()
+        .context("公式サイトURLのポート番号が不正です")?;
+    if !matches!(port, 80 | 443) {
+        return Err(anyhow::anyhow!("公式サイトURLの非標準ポートは使用できません"));
+    }
+
+    match url.host().context("公式サイトURLにホスト名がありません")? {
+        url::Host::Ipv4(address) => {
+            let address = IpAddr::V4(address);
+            ensure_public_ip(address)?;
+            Ok(ResolvedPublicTarget {
+                host: None,
+                addresses: vec![SocketAddr::new(address, port)],
+            })
+        }
+        url::Host::Ipv6(address) => {
+            let address = IpAddr::V6(address);
+            ensure_public_ip(address)?;
+            Ok(ResolvedPublicTarget {
+                host: None,
+                addresses: vec![SocketAddr::new(address, port)],
+            })
+        }
+        url::Host::Domain(domain) => {
+            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+            if is_local_hostname(&domain) {
+                return Err(anyhow::anyhow!("ローカルまたは内部向けホスト名には接続できません"));
+            }
+            let mut addresses = tokio::net::lookup_host((domain.as_str(), port))
+                .await
+                .with_context(|| format!("公式サイトのDNS解決に失敗しました: {domain}"))?
+                .collect::<Vec<_>>();
+            addresses.sort_unstable();
+            addresses.dedup();
+            if addresses.is_empty() {
+                return Err(anyhow::anyhow!("公式サイトのDNS応答が空です"));
+            }
+            // Reject a mixed public/private answer rather than allowing the
+            // HTTP client to choose an unsafe address. The validated public
+            // answers are then pinned into reqwest to close the DNS-rebinding
+            // gap between validation and connection.
+            for address in &addresses {
+                ensure_public_ip(address.ip())?;
+            }
+            Ok(ResolvedPublicTarget {
+                host: Some(domain),
+                addresses,
+            })
+        }
+    }
+}
+
+fn is_local_hostname(host: &str) -> bool {
+    host == "localhost"
+        || [".localhost", ".local", ".internal", ".home", ".lan", ".onion"]
+            .iter()
+            .any(|suffix| host.ends_with(suffix))
+}
+
+fn ensure_public_ip(address: IpAddr) -> anyhow::Result<()> {
+    let public = match address {
+        IpAddr::V4(address) => is_public_ipv4(address),
+        IpAddr::V6(address) => is_public_ipv6(address),
+    };
+    if public {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "ローカル・プライベート・予約済みIPアドレスには接続できません"
+        ))
+    }
+}
+
+fn is_public_ipv4(address: Ipv4Addr) -> bool {
+    let [a, b, c, _] = address.octets();
+    !(a == 0
+        || a == 10
+        || a == 127
+        || a >= 224
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 192 && b == 0 && c == 2)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113))
+}
+
+fn is_public_ipv6(address: Ipv6Addr) -> bool {
+    if let Some(ipv4) = address.to_ipv4() {
+        return is_public_ipv4(ipv4);
+    }
+    let segments = address.segments();
+    !(address.is_unspecified()
+        || address.is_loopback()
+        || (segments[0] == 0x0064 && segments[1] == 0xff9b)
+        || (segments[0] & 0xfe00) == 0xfc00
+        || (segments[0] & 0xffc0) == 0xfe80
+        || (segments[0] & 0xffc0) == 0xfec0
+        || (segments[0] & 0xff00) == 0xff00
+        || (segments[0] == 0x2001 && segments[1] == 0)
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || segments[0] == 0x2002
+        || (segments[0] == 0x0100 && segments[1..].iter().all(|segment| *segment == 0)))
+}
+
+fn looks_like_html(body: &[u8]) -> bool {
+    let prefix = String::from_utf8_lossy(&body[..body.len().min(512)]).to_ascii_lowercase();
+    let prefix = prefix.trim_start_matches('\u{feff}').trim_start();
+    prefix.starts_with("<!doctype html")
+        || prefix.starts_with("<html")
+        || prefix.starts_with("<!--")
+}
+
 fn extract_phone(html: &str) -> Option<String> {
     let tel_pattern = Regex::new(r"(?i)tel:\s*([+0-9０-９\s\-‐‑‒–—−ー()（）]{7,})").ok()?;
     let visible_pattern = Regex::new(r"(?:\+81|0)[0-9０-９\s\-‐‑‒–—−ー()（）]{7,}[0-9０-９]").ok()?;
@@ -303,4 +543,65 @@ fn normalize_phone(value: &str) -> Option<String> {
     }
     let digit_count = normalized.chars().filter(|ch| ch.is_ascii_digit()).count();
     if (10..=15).contains(&digit_count) { Some(normalized) } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssrf_guard_rejects_private_reserved_and_transition_addresses() {
+        for address in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.169.254",
+            "192.168.1.1",
+            "100.64.0.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "2001:db8::1",
+            "64:ff9b::7f00:1",
+        ] {
+            let address: IpAddr = address.parse().expect("valid test IP");
+            assert!(ensure_public_ip(address).is_err(), "accepted {address}");
+        }
+        assert!(ensure_public_ip("1.1.1.1".parse().unwrap()).is_ok());
+        assert!(ensure_public_ip("2606:4700:4700::1111".parse().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn ssrf_guard_rejects_internal_hostnames_and_detects_html() {
+        for host in [
+            "localhost",
+            "service.local",
+            "metadata.internal",
+            "router.lan",
+            "hidden.onion",
+        ] {
+            assert!(is_local_hostname(host), "accepted {host}");
+        }
+        assert!(!is_local_hostname("example.com"));
+        assert!(looks_like_html(b"  <!doctype html><html></html>"));
+        assert!(!looks_like_html(b"{\"phone\":\"03-1234-5678\"}"));
+    }
+
+    #[tokio::test]
+    async fn ssrf_guard_rejects_credentials_ports_and_literal_loopback_before_fetch() {
+        for value in [
+            "http://127.0.0.1/",
+            "https://[::1]/",
+            "https://user:pass@example.com/",
+            "https://example.com:8443/",
+        ] {
+            let url = Url::parse(value).expect("valid URL");
+            assert!(resolve_public_target(&url).await.is_err(), "accepted {value}");
+        }
+    }
+
+    #[test]
+    fn phone_normalization_accepts_japanese_full_width_digits() {
+        assert_eq!(normalize_phone("ＴＥＬ：０３－１２３４－５６７８"), Some("0312345678".to_string()));
+        assert_eq!(normalize_phone("123"), None);
+    }
 }

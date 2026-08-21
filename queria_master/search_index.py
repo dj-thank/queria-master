@@ -16,11 +16,14 @@ from .resources import PROJECT_ROOT
 from .runtime import DEFAULT_RUNTIME_DB
 
 
-SEARCH_INDEX_VERSION = "7"
+SEARCH_INDEX_VERSION = "8"
 DEFAULT_SEARCH_INDEX = PROJECT_ROOT / "data" / "search.sqlite"
 _BATCH_SIZE = 20_000
-_MAX_TRIGRAM_QUERY_LENGTH = 256
+MAX_SEARCH_KEYWORD_LENGTH = 256
 _UNSAFE_QUERY = re.compile(r"[\"'*:()\-]|\b(?:AND|OR|NOT|NEAR)\b", re.IGNORECASE)
+_URL_QUERY = re.compile(r"^https?://", re.IGNORECASE)
+_PHONE_QUERY = re.compile(r"^\+?[0-9][0-9\s().\-]*[0-9]$")
+_JSIC_TOKEN = re.compile(r"^([A-T])(?:([0-9]{2})[0-9]{0,3})?$", re.IGNORECASE)
 
 SEARCH_RESULT_COLUMNS = (
     "corporate_number",
@@ -43,6 +46,10 @@ SEARCH_RESULT_COLUMNS = (
 
 class SearchIndexError(RuntimeError):
     """検索索引が利用できない、または原本DBと一致しない場合の例外。"""
+
+
+class SearchQueryError(SearchIndexError):
+    """検索条件が索引の安全な問い合わせ上限を超えている。"""
 
 
 def _quote_identifier(value: str) -> str:
@@ -68,9 +75,39 @@ def _trigrams(value: str) -> list[str]:
     return [value[index : index + 3] for index in range(len(value) - 2)]
 
 
+def validate_search_keyword(keyword: Any) -> str:
+    """Return the normalized keyword or reject input that would force a full scan."""
+    raw_value = "" if keyword is None else str(keyword).strip()
+    value = _normalise_text(raw_value)
+    if "\x00" in raw_value or "\x00" in value:
+        raise SearchQueryError("キーワードにNUL文字は使用できません。")
+    if max(len(raw_value), len(value)) > MAX_SEARCH_KEYWORD_LENGTH:
+        raise SearchQueryError(
+            f"キーワードは{MAX_SEARCH_KEYWORD_LENGTH}文字以内で指定してください。"
+        )
+    return value
+
+
+def _quoted_fts_phrase(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _contact_fts_query(keyword: str) -> str | None:
+    """Build a column-scoped FTS query for punctuation-heavy contact values."""
+    value = _normalise_text(keyword)
+    if len(value) < 3:
+        return None
+    phrase = _quoted_fts_phrase(value)
+    if _URL_QUERY.match(value):
+        return f"{{company_url inquiry_form_url}} : {phrase}"
+    if _PHONE_QUERY.fullmatch(value) and len(re.sub(r"\D", "", value)) >= 6:
+        return f"phone : {phrase}"
+    return None
+
+
 def _fts_query(keyword: str) -> str | None:
     value = _normalise_text(keyword)
-    if len(value) < 3 or len(value) > _MAX_TRIGRAM_QUERY_LENGTH or _UNSAFE_QUERY.search(value):
+    if len(value) < 3 or len(value) > MAX_SEARCH_KEYWORD_LENGTH or _UNSAFE_QUERY.search(value):
         return None
     grams = list(dict.fromkeys(_trigrams(value)))
     if not grams:
@@ -78,7 +115,32 @@ def _fts_query(keyword: str) -> str | None:
     # detail=full enables an exact phrase over the trigram tokens.  This is
     # slightly larger than detail=none, but avoids a second full-text LIKE
     # verification scan for common terms such as 株式会社.
-    return '"' + value.replace('"', '""') + '"'
+    return _quoted_fts_phrase(value)
+
+
+def _parse_jsic_categories(
+    raw_codes: Any,
+    major_codes: Any = None,
+    middle_codes: Any = None,
+) -> list[tuple[str | None, str | None]]:
+    """Parse complete JSIC tokens without treating substrings as codes."""
+    parsed: list[tuple[str | None, str | None]] = []
+    for raw_code in str(raw_codes or "").split("|"):
+        match = _JSIC_TOKEN.fullmatch(raw_code.strip())
+        if match:
+            parsed.append((match.group(1).upper(), match.group(2)))
+    if not parsed:
+        parsed.extend(
+            (code, None)
+            for value in str(major_codes or "").split("|")
+            if (code := value.strip().upper()) and re.fullmatch(r"[A-T]", code)
+        )
+        parsed.extend(
+            (None, code)
+            for value in str(middle_codes or "").split("|")
+            if (code := value.strip()) and re.fullmatch(r"[0-9]{2}", code)
+        )
+    return list(dict.fromkeys(parsed))
 
 
 def _numeric(value: Any) -> int | float | None:
@@ -353,19 +415,11 @@ def build_search_index(
                         )
                     )
                     fts_rows.append((doc_id, *searchable))
-                    raw_codes = str(values[13] or "")
-                    parsed_categories = []
-                    for code in raw_codes.split("|"):
-                        code = code.strip()
-                        if len(code) == 1 and code.isalpha():
-                            parsed_categories.append((code.upper(), None))
-                        elif len(code) == 3 and code[0].isalpha() and code[1:].isdigit():
-                            parsed_categories.append((code[0].upper(), code[1:]))
-                    if not parsed_categories:
-                        majors = [code.strip().upper() for code in str(values[5] or "").split("|") if code.strip()]
-                        middles = [code.strip() for code in str(values[6] or "").split("|") if code.strip()]
-                        parsed_categories.extend((major, None) for major in majors)
-                        parsed_categories.extend((None, middle) for middle in middles)
+                    parsed_categories = _parse_jsic_categories(
+                        values[13],
+                        values[5],
+                        values[6],
+                    )
                     category_rows.extend(
                         (doc_id, major, middle, values[3])
                         for major, middle in dict.fromkeys(parsed_categories)
@@ -573,7 +627,12 @@ class SearchIndex:
         if not 1 <= limit <= 100_000:
             raise SearchIndexError("limit は1〜100000の範囲で指定してください。")
         keyword_value = "" if keyword is None else str(keyword).strip()
-        fts = _fts_query(keyword_value) if keyword_value else None
+        normalized_keyword = validate_search_keyword(keyword_value)
+        fts = (
+            _contact_fts_query(normalized_keyword) or _fts_query(normalized_keyword)
+            if normalized_keyword
+            else None
+        )
         short_prefix_search = False
         where: list[str] = []
         params: list[Any] = []
@@ -594,7 +653,6 @@ class SearchIndex:
             where.append("company_fts MATCH ?")
             params.append(fts)
         if fts is None and keyword_value:
-            normalized_keyword = _normalise_text(keyword_value)
             if fast and (len(normalized_keyword) < 3 or _UNSAFE_QUERY.search(normalized_keyword)):
                 # SQLite's trigram tokenizer cannot answer sub-three-character
                 # or operator-like terms efficiently.  In the speed-priority
@@ -727,9 +785,12 @@ class SearchIndex:
 
 __all__ = [
     "DEFAULT_SEARCH_INDEX",
+    "MAX_SEARCH_KEYWORD_LENGTH",
     "SEARCH_INDEX_VERSION",
     "SEARCH_RESULT_COLUMNS",
     "SearchIndex",
     "SearchIndexError",
+    "SearchQueryError",
     "build_search_index",
+    "validate_search_keyword",
 ]

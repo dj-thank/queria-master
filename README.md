@@ -313,7 +313,9 @@ canonical DBとenrichment DBを壊さずに保持しつつ、利用時のJOINを
 
 CLI版・Desktop版はDBを実行ファイルへ埋め込まず、外部データとして隣接配置する設計です。データ更新だけで再利用でき、巨大DBの変更ごとにEXEを再ビルドする必要がありません。
 
-Desktop版:
+新しいデスクトップUIの正本は `company_scout/` のReact + Tauri/Rust版です。`queria_master/desktop_app.py` からビルドするTkinter版は既存配布向けのレガシー・メンテナンスUIとして残し、新しい操作設計と機能追加はTauri版を優先します。UIと検索の契約は [`docs/UI_SEARCH_WORKBENCH_2026-08-21.md`](docs/UI_SEARCH_WORKBENCH_2026-08-21.md) を参照してください。
+
+レガシーDesktop版:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\build_exe.py --mode desktop --bundle onedir
@@ -392,6 +394,7 @@ Public Company EnrichmentはGitHub Actionsで Python 3.11 / 3.12 / 3.13 の構�
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 全体設計
 - [`docs/V090_OPERATIONAL_ARCHITECTURE_JA.md`](docs/V090_OPERATIONAL_ARCHITECTURE_JA.md) — canonical / runtime / index運用
 - [`docs/COMPANYMASTER_INTEGRATION_JA.md`](docs/COMPANYMASTER_INTEGRATION_JA.md) — Windowsアプリ統合
+- [`docs/UI_SEARCH_WORKBENCH_2026-08-21.md`](docs/UI_SEARCH_WORKBENCH_2026-08-21.md) — React/Tauri検索UIと索引フォールバックの契約
 - [`docs/OUTBOUND_ENRICHMENT_RUNBOOK_JA.md`](docs/OUTBOUND_ENRICHMENT_RUNBOOK_JA.md) — 証拠付きenrichment運用
 - [`docs/SEARCH_PERFORMANCE.md`](docs/SEARCH_PERFORMANCE.md) — 検索性能の測定
 - [`docs/GITHUB_DISTRIBUTION_JA.md`](docs/GITHUB_DISTRIBUTION_JA.md) — 大容量配布

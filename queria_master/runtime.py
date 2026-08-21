@@ -315,6 +315,7 @@ def build_runtime_database(
     con = duckdb.connect(str(building_path), read_only=False)
     attached: list[str] = []
     copied: list[dict[str, Any]] = []
+    temp_dir: Path | None = None
     try:
         con.execute(f"PRAGMA threads={int(threads)}")
         con.execute(f"SET memory_limit={_sql_string(memory_limit)}")
@@ -401,8 +402,7 @@ def build_runtime_database(
             ) from exc
         raise
     finally:
-        temp_dirs = [p for p in output_path.parent.glob("queria-runtime-*") if p.is_dir()]
-        for temp_dir in temp_dirs:
+        if temp_dir is not None:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
