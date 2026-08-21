@@ -20,6 +20,10 @@ from xml.etree import ElementTree as ET
 import requests
 
 BASE = "https://api.edinet-fsa.go.jp/api/v2"
+DEFAULT_MAX_DOCUMENT_BYTES = 100 * 1024 * 1024
+MAX_XBRL_MEMBER_BYTES = 50 * 1024 * 1024
+MAX_XBRL_TOTAL_BYTES = 250 * 1024 * 1024
+MAX_ZIP_MEMBERS = 5_000
 AGE_NAMES = {
     "averageageyearsinformationaboutreportingcompanyinformationaboutemployees",
     "averageageyearsinformationaboutreportingcompany",
@@ -90,25 +94,49 @@ def request_json(session: requests.Session, url: str, params: dict[str, Any], ti
     raise RuntimeError(f"EDINET API失敗: {last}")
 
 
-def request_bytes(session: requests.Session, url: str, params: dict[str, Any], timeout: float, retries: int, sleep_s: float) -> bytes:
+def request_bytes(
+    session: requests.Session,
+    url: str,
+    params: dict[str, Any],
+    timeout: float,
+    retries: int,
+    sleep_s: float,
+    max_bytes: int = DEFAULT_MAX_DOCUMENT_BYTES,
+) -> bytes:
     last: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            r = session.get(url, params=params, timeout=timeout)
-            if r.status_code == 429:
-                wait = float(r.headers.get("Retry-After", sleep_s * (2 ** attempt)))
-                time.sleep(min(wait, 60))
-                continue
-            if r.status_code >= 500:
-                time.sleep(min(sleep_s * (2 ** attempt), 30))
-                continue
-            r.raise_for_status()
-            return r.content
+            with session.get(url, params=params, timeout=timeout, stream=True) as response:
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After") or ""
+                    try:
+                        wait = float(retry_after)
+                    except ValueError:
+                        wait = sleep_s * (2 ** attempt)
+                    time.sleep(min(wait, 60))
+                    continue
+                if response.status_code >= 500:
+                    time.sleep(min(sleep_s * (2 ** attempt), 30))
+                    continue
+                response.raise_for_status()
+                length = response.headers.get("Content-Length")
+                if length and int(length) > max_bytes:
+                    raise RuntimeError(f"EDINET document exceeds size limit: {length} bytes")
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise RuntimeError(f"EDINET document exceeds size limit: >{max_bytes} bytes")
+                    chunks.append(chunk)
+                return b"".join(chunks)
         except Exception as exc:
             last = exc
             if attempt < retries:
                 time.sleep(min(sleep_s * (2 ** attempt), 30))
-    raise RuntimeError(f"EDINET文書取得失敗: {last}")
+    raise RuntimeError(f"EDINET document fetch failed: {last}")
 
 
 def date_range(start: date, end: date):
@@ -147,6 +175,7 @@ def scan_latest_documents(session: requests.Session, api_key: str, by_sec: dict[
             sec = normalize_sec(doc.get("secCode"))
             if sec not in by_sec:
                 continue
+            # 取下げ・削除・無効文書は除外する。
             if str(doc.get("withdrawalStatus") or "0") not in {"0", ""}:
                 continue
             if str(doc.get("docInfoEditStatus") or "0") not in {"0", ""}:
@@ -174,12 +203,28 @@ def score_context(context_ref: str) -> int:
     return score
 
 
-def extract_xbrl_metrics(blob: bytes) -> tuple[float | None, int | None, dict[str, Any]]:
+def extract_xbrl_metrics(
+    blob: bytes,
+    *,
+    max_member_bytes: int = MAX_XBRL_MEMBER_BYTES,
+    max_total_bytes: int = MAX_XBRL_TOTAL_BYTES,
+) -> tuple[float | None, int | None, dict[str, Any]]:
     candidates_age: list[tuple[int, float, str, str]] = []
     candidates_salary: list[tuple[int, int, str, str]] = []
     files_seen: list[str] = []
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-        names = [n for n in zf.namelist() if n.lower().endswith((".xbrl", ".xml")) and "xbrl" in n.lower()]
+        infos = zf.infolist()
+        if len(infos) > MAX_ZIP_MEMBERS:
+            raise ValueError(f"ZIP member count exceeds limit: {len(infos)}")
+        total_size = sum(info.file_size for info in infos)
+        if total_size > max_total_bytes:
+            raise ValueError(f"ZIP uncompressed size exceeds limit: {total_size}")
+        names = [
+            info.filename for info in infos
+            if info.filename.lower().endswith((".xbrl", ".xml"))
+            and "xbrl" in info.filename.lower()
+            and info.file_size <= max_member_bytes
+        ]
         for name in names:
             files_seen.append(name)
             try:
@@ -231,6 +276,8 @@ def main() -> int:
     ap.add_argument("--retries", type=int, default=4)
     ap.add_argument("--sleep", type=float, default=0.25)
     ap.add_argument("--limit", type=int, default=0, help="検証用。対象証券コード数を制限")
+    ap.add_argument("--max-document-mb", type=int, default=100, help="EDINET ZIPの最大受信サイズ")
+    ap.add_argument("--trust-env", action="store_true", help="requestsのプロキシ環境変数を利用する")
     args = ap.parse_args()
 
     env = load_env(args.env)
@@ -244,7 +291,8 @@ def main() -> int:
         raise SystemExit("証券コードのある対象企業がありません。")
     start = args.from_date or (args.to_date - timedelta(days=args.days - 1))
     session = requests.Session()
-    session.headers.update({"User-Agent": "Public-Company-Enricher/1.0 (+data integration; low rate)"})
+    session.trust_env = args.trust_env
+    session.headers.update({"User-Agent": "Public-Company-Enricher/1.1 (+data integration; low rate)"})
     latest = scan_latest_documents(session, api_key, by_sec, args.cache_dir / "lists", start, args.to_date,
                                    args.timeout, args.retries, args.sleep)
 
@@ -261,17 +309,20 @@ def main() -> int:
             docs_found += 1
             doc_id = str(doc.get("docID") or "")
             cache = cache_docs / f"{doc_id}.zip"
+            blob = b""
             if cache.exists():
-                blob = cache.read_bytes()
-            else:
+                if cache.stat().st_size > args.max_document_mb * 1024 * 1024:
+                    cache.unlink(missing_ok=True)
+                blob = cache.read_bytes() if cache.exists() else b""
+            if not blob:
                 blob = request_bytes(session, f"{BASE}/documents/{doc_id}", {"type": 1, "Subscription-Key": api_key},
-                                     args.timeout, args.retries, args.sleep)
+                                     args.timeout, args.retries, args.sleep, max_bytes=args.max_document_mb * 1024 * 1024)
                 cache.write_bytes(blob)
                 time.sleep(args.sleep)
             try:
                 age, salary, debug = extract_xbrl_metrics(blob)
-            except zipfile.BadZipFile:
-                age, salary, debug = None, None, {"error": "BadZipFile"}
+            except (zipfile.BadZipFile, ValueError) as exc:
+                age, salary, debug = None, None, {"error": type(exc).__name__, "detail": str(exc)}
             if age is not None or salary is not None:
                 metrics_found += 1
             for fid in source_ids:
