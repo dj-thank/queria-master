@@ -30,6 +30,31 @@ class PhoneSecurityTests(unittest.TestCase):
         fax = phone.score_candidate("0312345678", "FAX", "text")
         self.assertGreater(tel, fax)
 
+    def test_visible_contact_number_beats_unlabelled_hidden_tel_link(self) -> None:
+        html = """
+        <html><body>
+          <a href="tel:0487574535" aria-hidden="true"></a>
+          <p>お電話によるお問い合わせは 0800-080-9696（無料通話）まで</p>
+        </body></html>
+        """
+        candidates, _links = phone.extract_candidates("https://example.com/", html)
+        winner = max(candidates, key=phone.candidate_sort_key)
+        self.assertEqual(winner["phone"], "08000809696")
+        self.assertEqual(winner["source"], "text")
+        self.assertIn("お問い合わせ", winner["context"])
+
+    def test_visible_context_is_retained_when_tel_href_has_same_number(self) -> None:
+        html = """
+        <html><body>
+          <p>会社概要　代表電話 <a href="tel:0312345678">03-1234-5678</a></p>
+        </body></html>
+        """
+        candidates, _links = phone.extract_candidates("https://example.com/company", html)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["phone"], "0312345678")
+        self.assertEqual(candidates[0]["source"], "text")
+        self.assertIn("代表電話", candidates[0]["context"])
+
 
 if __name__ == "__main__":
     unittest.main()

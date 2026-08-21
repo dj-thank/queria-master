@@ -1,0 +1,129 @@
+name: Build public corporate-number index
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/public-corporate-number-index.yml"
+      - "company_scout/public_enrichment/corporate_index_matcher.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-corporate-number-index-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install Queria Master
+        run: python -m pip install -e .
+      - name: Build the current all-corporations database
+        run: python -m queria_master refresh --scope all-corporations --no-cache
+      - name: Export a stream-matchable public index
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p public-index
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          import duckdb
+
+          database = Path("data/queria_master.duckdb")
+          output = Path("public-index/corporate_number_index.tsv")
+          connection = duckdb.connect(str(database), read_only=True)
+          try:
+              connection.execute(
+                  """
+                  COPY (
+                      SELECT
+                          corporate_number,
+                          company_name,
+                          company_name_kana,
+                          post_code,
+                          prefecture_name,
+                          city_name,
+                          street_number,
+                          full_address,
+                          company_url,
+                          representative_name,
+                          employee_number,
+                          capital_stock,
+                          business_summary,
+                          jsic_middle_codes,
+                          nta_update_date
+                      FROM core.companies
+                      WHERE corporate_number IS NOT NULL
+                      ORDER BY company_name, corporate_number
+                  ) TO ? (
+                      FORMAT CSV,
+                      HEADER TRUE,
+                      DELIMITER '\t',
+                      QUOTE '"',
+                      ESCAPE '"'
+                  )
+                  """,
+                  [str(output)],
+              )
+              row_count = int(connection.execute("SELECT count(*) FROM core.companies").fetchone()[0])
+              distinct_count = int(
+                  connection.execute("SELECT count(DISTINCT corporate_number) FROM core.companies").fetchone()[0]
+              )
+          finally:
+              connection.close()
+          Path("public-index/index_build_metadata.json").write_text(
+              json.dumps(
+                  {
+                      "source": "Queria public corporate snapshot",
+                      "rows": row_count,
+                      "distinct_corporate_numbers": distinct_count,
+                      "uncompressed_bytes": output.stat().st_size,
+                  },
+                  ensure_ascii=False,
+                  indent=2,
+              ),
+              encoding="utf-8",
+          )
+          PY
+          zstd -T0 -6 --rm public-index/corporate_number_index.tsv
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          output = Path("public-index/corporate_number_index.tsv.zst")
+          metadata_path = Path("public-index/index_build_metadata.json")
+          metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+          digest = hashlib.sha256()
+          with output.open("rb") as handle:
+              while chunk := handle.read(1024 * 1024):
+                  digest.update(chunk)
+          summary = {
+              **metadata,
+              "format": "UTF-8 TSV compressed with Zstandard",
+              "compressed_bytes": output.stat().st_size,
+              "sha256": digest.hexdigest(),
+          }
+          Path("public-index/corporate_number_index_summary.json").write_text(
+              json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+          )
+          metadata_path.unlink()
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-corporate-number-index
+          path: public-index/*
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
