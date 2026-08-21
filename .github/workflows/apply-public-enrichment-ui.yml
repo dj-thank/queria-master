@@ -15,22 +15,23 @@ jobs:
   apply-and-verify:
     if: >-
       github.head_ref == 'feat/public-enrichment-desktop' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner
     runs-on: windows-latest
     defaults:
       run:
         working-directory: company_scout
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
 
@@ -40,7 +41,7 @@ jobs:
           rustup default stable
           rustup component add rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: company_scout/src-tauri -> target
 
@@ -160,11 +161,82 @@ jobs:
           if (Test-Path $workflow) {
             Remove-Item $workflow -Force
           }
-          git add -A
-          git diff --cached --quiet
+
+          $repoRoot = (Resolve-Path (Join-Path $PWD "..")).Path
+          $allowedPaths = @(
+            ".github/workflows/apply-public-enrichment-ui.yml"
+            "company_scout/.integration/bundle.part-00"
+            "company_scout/.integration/bundle.part-01"
+            "company_scout/.integration/ready"
+            "company_scout/public_enrichment/README.md"
+            "company_scout/public_enrichment/prepare_windows.cmd"
+            "company_scout/public_enrichment/public_data_enricher.py"
+            "company_scout/public_enrichment/tests/test_public_data_enricher.py"
+            "company_scout/src/App.tsx"
+            "company_scout/src/api.ts"
+            "company_scout/src/styles.css"
+            "company_scout/src/types.ts"
+            "company_scout/src-tauri/src/lib.rs"
+            "company_scout/src-tauri/src/public_enrichment.rs"
+            "company_scout/src-tauri/tauri.conf.json"
+          )
+          $requiredPaths = @(
+            ".github/workflows/apply-public-enrichment-ui.yml"
+            "company_scout/.integration/bundle.part-00"
+            "company_scout/.integration/bundle.part-01"
+            "company_scout/.integration/ready"
+            "company_scout/src-tauri/src/public_enrichment.rs"
+          )
+          $changedPaths = @(
+            git -C $repoRoot diff --name-only
+            git -C $repoRoot ls-files --others --exclude-standard
+          ) | Where-Object { $_ } | Sort-Object -Unique
+          $unexpected = @($changedPaths | Where-Object { $_ -notin $allowedPaths })
+          if ($unexpected) {
+            $unexpected | ForEach-Object { Write-Error "Unexpected generated path: $_" }
+            throw "Refusing to commit paths outside the integration allowlist."
+          }
+          $missing = @($requiredPaths | Where-Object { $_ -notin $changedPaths })
+          if ($missing) {
+            $missing | ForEach-Object { Write-Error "Missing required generated path: $_" }
+            throw "The one-shot integration did not produce its required path set."
+          }
+
+          git -C $repoRoot add -- $changedPaths
+          if ($LASTEXITCODE -ne 0) { throw "Failed to stage the verified integration path set." }
+          git -C $repoRoot diff --cached --check
+          if ($LASTEXITCODE -ne 0) { throw "The staged integration diff failed git diff --check." }
+
+          $addedLines = git -C $repoRoot diff --cached --unified=0 |
+            Where-Object { $_ -match '^\+(?!\+\+)' }
+          $secretPatterns = @(
+            "-----BEGIN PRIVATE KEY-----"
+            "-----BEGIN RSA PRIVATE KEY-----"
+            "-----BEGIN OPENSSH PRIVATE KEY-----"
+            "github_pat_"
+            "ghp_"
+            "sk-proj-"
+          )
+          $secretMatches = $addedLines | Select-String -Pattern $secretPatterns -SimpleMatch
+          if ($secretMatches) {
+            $secretMatches | ForEach-Object { Write-Error $_.Line }
+            throw "Potential secret material detected in added lines."
+          }
+
+          $remaining = @(
+            git -C $repoRoot diff --name-only
+            git -C $repoRoot ls-files --others --exclude-standard
+          ) | Where-Object { $_ }
+          if ($remaining) {
+            $remaining | ForEach-Object { Write-Error "Unstaged path remains: $_" }
+            throw "Refusing to commit with unstaged or untracked changes."
+          }
+          git -C $repoRoot diff --cached --quiet
           if ($LASTEXITCODE -eq 0) {
             Write-Host "No source changes to commit."
             exit 0
           }
-          git commit -m "feat: connect public enrichment to desktop app"
-          git push origin HEAD:feat/public-enrichment-desktop
+          git -C $repoRoot commit -m "feat: connect public enrichment to desktop app"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to create the generated integration commit." }
+          git -C $repoRoot push origin HEAD:feat/public-enrichment-desktop
+          if ($LASTEXITCODE -ne 0) { throw "Failed to push the generated integration commit." }
