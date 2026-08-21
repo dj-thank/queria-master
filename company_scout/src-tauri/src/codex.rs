@@ -179,17 +179,18 @@ impl CodexManager {
 - 業種は日本標準産業分類(JSIC)の大分類→中分類→小分類→細分類を意識する。
 - 4桁などの業種コードに自信がない場合は、コードを捏造せずindustry_termsへ日本語キーワードを入れる。
 - 「ITっぽい」「こういう会社」のような曖昧条件はindustry_terms/keyword_anyへ分解する。
-- website_requiredは明示された場合のみ設定する。
+- company_kindsは日本語名ではなく法人種別コードを使う（株式会社=301、有限会社=302、合名会社=303、合資会社=304、合同会社=305、その他の設立登記法人=399）。
+- website_requiredとphone_requiredは明示された場合のみ設定する。
 - 件数指定がなければlimit=30000。最大10000000（現在の全量スナップショットを上限で切らない）。
-- textには元の要望を短く残す。
+- textは会社名・住所・事業概要などに実際に含まれる自由検索語がある場合だけ設定する。元の要望文全体を入れない。
+- sort_byはrelevance/name/employees/capital、sort_directionはasc/descだけを使う。
 - 値が不明な条件は無理に補わない。
 
 ユーザー要望:
 {query}
 "#);
         let (_, text) = self.run_turn(&prompt, Some(schema), "low").await?;
-        let mut plan: SearchPlan = parse_json_text(&text)?;
-        plan.text = Some(query.to_string());
+        let plan: SearchPlan = parse_json_text(&text)?;
         Ok(plan.normalize())
     }
 
@@ -419,11 +420,14 @@ fn search_plan_schema() -> Value {
         "established_from":{"type":["integer","null"]},
         "established_to":{"type":["integer","null"]},
         "website_required":{"type":["boolean","null"]},
+        "phone_required":{"type":["boolean","null"]},
         "keyword_any":{"type":"array","items":{"type":"string"}},
         "keyword_all":{"type":"array","items":{"type":"string"}},
+        "sort_by":{"type":["string","null"],"enum":["relevance","name","employees","capital",null]},
+        "sort_direction":{"type":["string","null"],"enum":["asc","desc",null]},
         "limit":{"type":"integer","minimum":1,"maximum":10000000}
       },
-      "required":["text","prefectures","cities","industry_codes","industry_terms","company_kinds","min_employees","max_employees","min_capital","max_capital","established_from","established_to","website_required","keyword_any","keyword_all","limit"],
+      "required":["text","prefectures","cities","industry_codes","industry_terms","company_kinds","min_employees","max_employees","min_capital","max_capital","established_from","established_to","website_required","phone_required","keyword_any","keyword_all","sort_by","sort_direction","limit"],
       "additionalProperties":false
     })
 }

@@ -20,6 +20,9 @@ class RuntimeDatabaseTests(unittest.TestCase):
             canonical = root / "canonical.duckdb"
             enrichment = root / "enrichment.duckdb"
             runtime = root / "runtime.duckdb"
+            unrelated_temp = root / "queria-runtime-owned-by-another-process"
+            unrelated_temp.mkdir()
+            (unrelated_temp / "keep.txt").write_text("keep", encoding="utf-8")
 
             con = duckdb.connect(str(canonical))
             try:
@@ -47,6 +50,10 @@ class RuntimeDatabaseTests(unittest.TestCase):
             self.assertEqual(stats["profile"]["row_count"], 2)
             self.assertTrue(stats["generation_id"])
             self.assertTrue(runtime.is_file())
+            self.assertEqual(
+                (unrelated_temp / "keep.txt").read_text(encoding="utf-8"),
+                "keep",
+            )
 
             summary = runtime_summary(runtime)
             self.assertEqual(summary["counts"]["companies"], 2)
