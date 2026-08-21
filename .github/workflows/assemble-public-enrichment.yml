@@ -7,6 +7,13 @@ on:
     paths:
       - .github/workflows/assemble-public-enrichment.yml
       - company_scout/public_enrichment/.assembly/ready
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/workflows/assemble-public-enrichment.yml
+      - company_scout/public_enrichment/.assembly/**
 
 permissions:
   contents: write
