@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import csv
 import html
+import ipaddress
+import socket
 import json
 import re
 import sqlite3
@@ -19,7 +21,10 @@ from urllib.robotparser import RobotFileParser
 
 import requests
 
-USER_AGENT = "Public-Company-Enricher/1.0 (+official contact discovery; low rate)"
+USER_AGENT = "Public-Company-Enricher/1.1 (+official contact discovery; low rate)"
+MAX_HTML_BYTES = 2_000_000
+MAX_ROBOTS_BYTES = 512_000
+MAX_REDIRECTS = 5
 PHONE_RE = re.compile(r"(?<!\d)(?:\+81[-\s]?(?:\(0\))?\d{1,4}|0\d{1,4})[-‐‑‒–—―ー\s()]?\d{1,4}[-‐‑‒–—―ー\s]?\d{3,4}(?!\d)")
 LINK_HINTS = ["company", "corporate", "about", "profile", "contact", "outline", "overview", "会社", "企業", "概要", "お問い合わせ", "連絡先"]
 FAX_HINTS = ["fax", "ファックス", "ｆａｘ"]
@@ -89,18 +94,98 @@ def canonical_url(base: str, href: str) -> str:
     return urldefrag(urljoin(base, href))[0]
 
 
+
+def is_public_http_url(url: str) -> bool:
+    """Reject non-web schemes and destinations that can reach local/private networks."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return False
+        if parsed.username or parsed.password:
+            return False
+        host = (parsed.hostname or "").strip(".").lower()
+        if not host or host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+            return False
+        if parsed.port not in {None, 80, 443}:
+            return False
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme.lower() == "https" else 80), type=socket.SOCK_STREAM)
+        addresses = {info[4][0].split("%", 1)[0] for info in infos}
+        if not addresses:
+            return False
+        return all(ipaddress.ip_address(address).is_global for address in addresses)
+    except (OSError, ValueError):
+        return False
+
+
+def safe_get_text(
+    session: requests.Session,
+    url: str,
+    *,
+    expected_host: str,
+    timeout: float,
+    max_bytes: int,
+) -> tuple[str, int, dict[str, str], str] | None:
+    current = url
+    for _ in range(MAX_REDIRECTS + 1):
+        if not is_public_http_url(current) or not same_host(current, expected_host):
+            return None
+        try:
+            response = session.get(current, timeout=timeout, allow_redirects=False, stream=True)
+        except requests.RequestException:
+            return None
+        try:
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("Location") or ""
+                next_url = canonical_url(current, location)
+                if not next_url:
+                    return None
+                current = next_url
+                continue
+            length = response.headers.get("Content-Length")
+            if length and int(length) > max_bytes:
+                return None
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    return None
+                chunks.append(chunk)
+            encoding = response.encoding or "utf-8"
+            text = b"".join(chunks).decode(encoding, errors="replace")
+            return current, response.status_code, dict(response.headers), text
+        except (ValueError, LookupError):
+            return None
+        finally:
+            response.close()
+    return None
+
+
 def build_robot(session: requests.Session, base_url: str, timeout: float) -> RobotFileParser:
     parsed = urlparse(base_url)
+    host = (parsed.hostname or "").lower()
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-    rp = RobotFileParser(); rp.set_url(robots_url)
-    try:
-        r = session.get(robots_url, timeout=timeout)
-        if r.status_code == 200:
-            rp.parse(r.text.splitlines())
-        else:
-            rp.parse([])
-    except requests.RequestException:
+    rp = RobotFileParser()
+    rp.set_url(robots_url)
+    result = safe_get_text(
+        session,
+        robots_url,
+        expected_host=host,
+        timeout=timeout,
+        max_bytes=MAX_ROBOTS_BYTES,
+    )
+    if result is None:
+        rp.parse(["User-agent: *", "Disallow: /"])
+        return rp
+    _url, status, _headers, text = result
+    if status == 200:
+        rp.parse(text.splitlines())
+    elif status == 404:
         rp.parse([])
+    else:
+        rp.parse(["User-agent: *", "Disallow: /"])
     return rp
 
 
@@ -145,7 +230,7 @@ def discover_for_site(session: requests.Session, website: str, max_pages: int, t
         website = "https://" + website.lstrip("/")
     parsed = urlparse(website)
     host = (parsed.hostname or "").lower()
-    if not host:
+    if not host or not is_public_http_url(website):
         return None
     rp = build_robot(session, website, timeout)
     queue = [website]
@@ -155,40 +240,44 @@ def discover_for_site(session: requests.Session, website: str, max_pages: int, t
         url = queue.pop(0)
         if url in visited or not same_host(url, host):
             continue
+        visited.add(url)
         if not rp.can_fetch(USER_AGENT, url):
-            visited.add(url)
             continue
-        try:
-            r = session.get(url, timeout=timeout, allow_redirects=True)
-            visited.add(url)
-            if r.status_code != 200 or "text/html" not in (r.headers.get("Content-Type") or "").lower():
-                continue
-            if not same_host(r.url, host):
-                continue
-            candidates, links = extract_candidates(r.url, r.text)
-            all_candidates.extend(candidates)
-            scored_links: list[tuple[int, str]] = []
-            for href, label in links:
-                u = canonical_url(r.url, href)
-                if not u or not same_host(u, host) or u in visited:
-                    continue
-                clue = (u + " " + label).lower()
-                score = sum(1 for hint in LINK_HINTS if hint.lower() in clue)
-                if score:
-                    scored_links.append((score, u))
-            for _score, u in sorted(scored_links, key=lambda x: (-x[0], len(x[1])))[:max_pages]:
-                if u not in queue:
-                    queue.append(u)
-            time.sleep(sleep_s)
-        except requests.RequestException:
-            visited.add(url)
+        result = safe_get_text(
+            session,
+            url,
+            expected_host=host,
+            timeout=timeout,
+            max_bytes=MAX_HTML_BYTES,
+        )
+        if result is None:
             continue
+        final_url, status, headers, text = result
+        if status != 200 or "text/html" not in (headers.get("Content-Type") or headers.get("content-type") or "").lower():
+            continue
+        candidates, links = extract_candidates(final_url, text)
+        all_candidates.extend(candidates)
+        scored_links: list[tuple[int, str]] = []
+        for href, label in links:
+            candidate_url = canonical_url(final_url, href)
+            if not candidate_url or not same_host(candidate_url, host) or candidate_url in visited:
+                continue
+            clue = (candidate_url + " " + label).lower()
+            score = sum(1 for hint in LINK_HINTS if hint.lower() in clue)
+            if score:
+                scored_links.append((score, candidate_url))
+        for _score, candidate_url in sorted(scored_links, key=lambda x: (-x[0], len(x[1])))[:max_pages]:
+            if candidate_url not in queue:
+                queue.append(candidate_url)
+        time.sleep(max(0.0, sleep_s))
     if not all_candidates:
         return None
-    def key(c: dict[str, Any]):
-        p = c["phone"]
-        fixed_bonus = 1 if not p.startswith(("050", "070", "080", "090", "0570", "0120", "0800")) else 0
-        return (c["score"], fixed_bonus, -len(c["context"]))
+
+    def key(candidate: dict[str, Any]):
+        phone = candidate["phone"]
+        fixed_bonus = 1 if not phone.startswith(("050", "070", "080", "090", "0570", "0120", "0800")) else 0
+        return (candidate["score"], fixed_bonus, -len(candidate["context"]))
+
     return max(all_candidates, key=key)
 
 
@@ -210,9 +299,10 @@ def main() -> int:
     ap.add_argument("--sleep", type=float, default=1.0)
     ap.add_argument("--timeout", type=float, default=20)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--trust-env", action="store_true", help="requestsのプロキシ環境変数を利用する")
     args = ap.parse_args()
     targets = load_targets(args.db, args.limit)
-    session = requests.Session(); session.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.7"})
+    session = requests.Session(); session.trust_env = args.trust_env; session.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.7"})
     args.output.parent.mkdir(parents=True, exist_ok=True)
     fields = ["SOURCE_ID","企業名","法人番号","公式サイトURL","電話番号","根拠URL","根拠テキスト","信頼度","取得日時"]
     found = 0
