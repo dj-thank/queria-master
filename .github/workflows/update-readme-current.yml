@@ -4,14 +4,16 @@ on:
   push:
     branches:
       - docs/readme-current-20260821
-    paths:
-      - .github/workflows/update-readme-current.yml
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
   update-readme:
+    if: github.event_name == 'push' || github.head_ref == 'docs/readme-current-20260821'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
