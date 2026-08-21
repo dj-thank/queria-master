@@ -1,42 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Match a caller-local company CSV against a public corporate-number Parquet index."""
+"""Match a caller-local company CSV against a streamed public corporate index."""
 from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import re
-import sqlite3
+import shutil
+import subprocess
 import unicodedata
+from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
-
-import duckdb
+from typing import Any, Iterator, TextIO
 
 CSV_ENCODING = "utf-8-sig"
 NAME_ALIASES = ["企業名", "会社名", "法人名", "商号又は名称", "company_name", "name"]
 ADDRESS_ALIASES = ["所在地", "本店所在地", "住所", "full_address", "address"]
 SOURCE_ID_ALIASES = ["SOURCE_ID", "LOCAL_SOURCE_ID", "source_id", "id"]
-CORPORATE_DESIGNATORS = (
-    "株式会社",
-    "有限会社",
-    "合同会社",
-    "合資会社",
-    "合名会社",
-    "一般社団法人",
-    "一般財団法人",
-    "公益社団法人",
-    "公益財団法人",
-    "社会福祉法人",
-    "医療法人",
-    "学校法人",
-    "宗教法人",
-    "特定非営利活動法人",
-    "独立行政法人",
-    "地方独立行政法人",
-    "国立大学法人",
-)
+MAX_REVIEW_CANDIDATES = 10
 
 
 def clean(value: Any) -> str:
@@ -62,16 +46,27 @@ def find_key(fields: list[str], aliases: list[str]) -> str | None:
 
 
 def normalize_name(value: Any) -> str:
+    """Normalize notation while preserving the legal entity type."""
     text = unicodedata.normalize("NFKC", clean(value)).lower()
-    for token in CORPORATE_DESIGNATORS:
-        text = text.replace(token.lower(), "")
-    text = text.replace("㈱", "").replace("(株)", "").replace("（株）", "")
-    text = text.replace("㈲", "").replace("(有)", "").replace("（有）", "")
-    return re.sub(r"[\s\u3000・･\.．,，'’\"“”\-‐–—_()（）\[\]【】/\\]+", "", text)
+    replacements = {
+        "(株)": "株式会社",
+        "(有)": "有限会社",
+        "(同)": "合同会社",
+        "(資)": "合資会社",
+        "(名)": "合名会社",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    return re.sub(
+        r"[\s\u3000・･\.．,，'’\"“”\-‐–—_()（）\[\]【】/\\]+",
+        "",
+        text,
+    )
 
 
 def normalize_address(value: Any) -> str:
     text = unicodedata.normalize("NFKC", clean(value)).lower()
+    text = re.sub(r"〒?\s*\d{3}[-‐‑‒–—―ー]?\d{4}", "", text)
     for source, target in {
         "〇": "0",
         "一": "1",
@@ -94,8 +89,7 @@ def normalize_address(value: Any) -> str:
         .replace("字", "")
     )
     text = re.sub(r"[\s\u3000・･\.．,，'’\"“”()（）\[\]【】/\\]+", "", text)
-    text = re.sub(r"[-‐‑‒–—―ー]+", "", text)
-    return text
+    return re.sub(r"[-‐‑‒–—―ー]+", "", text)
 
 
 def read_targets(path: Path) -> list[dict[str, str]]:
@@ -108,12 +102,16 @@ def read_targets(path: Path) -> list[dict[str, str]]:
         if not name_key or not address_key:
             raise ValueError("input CSV requires company-name and address columns")
         rows: list[dict[str, str]] = []
+        source_ids: set[str] = set()
         for index, row in enumerate(reader, start=1):
             source_id = clean(row.get(source_key, "")) if source_key else ""
             company_name = clean(row.get(name_key, ""))
             address = clean(row.get(address_key, ""))
             if not source_id:
                 source_id = f"row-{index:08d}"
+            if source_id in source_ids:
+                raise ValueError(f"duplicate source ID: {source_id}")
+            source_ids.add(source_id)
             if not company_name or not address:
                 continue
             rows.append(
@@ -128,36 +126,91 @@ def read_targets(path: Path) -> list[dict[str, str]]:
     return rows
 
 
-def _register_targets(connection: duckdb.DuckDBPyConnection, rows: list[dict[str, str]]) -> None:
-    connection.execute(
-        """
-        CREATE TEMP TABLE targets(
-            source_id VARCHAR,
-            company_name VARCHAR,
-            address VARCHAR,
-            name_norm VARCHAR,
-            address_norm VARCHAR
-        )
-        """
-    )
-    connection.executemany(
-        "INSERT INTO targets VALUES(?,?,?,?,?)",
-        [
-            (
-                row["source_id"],
-                row["company_name"],
-                row["address"],
-                row["name_norm"],
-                row["address_norm"],
+@contextmanager
+def open_public_index(path: Path) -> Iterator[TextIO]:
+    """Open plain TSV/CSV or Zstandard-compressed text without loading it into memory."""
+    lower_name = path.name.lower()
+    if not lower_name.endswith(".zst"):
+        with path.open("r", encoding=CSV_ENCODING, newline="") as handle:
+            yield handle
+        return
+
+    try:
+        import zstandard  # type: ignore
+    except ImportError:
+        executable = shutil.which("zstd")
+        if not executable:
+            raise RuntimeError(
+                "Zstandard index requires the Python zstandard package or a zstd executable"
             )
-            for row in rows
-        ],
-    )
+        process = subprocess.Popen(
+            [executable, "-dc", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if process.stdout is None:
+            process.kill()
+            raise RuntimeError("failed to open zstd output stream")
+        text = io.TextIOWrapper(process.stdout, encoding=CSV_ENCODING, newline="")
+        try:
+            yield text
+        finally:
+            text.close()
+            stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+            return_code = process.wait()
+            if return_code != 0:
+                raise RuntimeError(f"zstd decompression failed: {stderr.strip()}")
+        return
+
+    with path.open("rb") as compressed:
+        decompressor = zstandard.ZstdDecompressor()
+        with decompressor.stream_reader(compressed) as stream:
+            text = io.TextIOWrapper(stream, encoding=CSV_ENCODING, newline="")
+            try:
+                yield text
+            finally:
+                text.detach()
 
 
-def _install_normalizers(connection: duckdb.DuckDBPyConnection) -> None:
-    connection.create_function("py_norm_name", normalize_name, [str], str)
-    connection.create_function("py_norm_address", normalize_address, [str], str)
+def public_delimiter(path: Path) -> str:
+    name = path.name.lower()
+    return "\t" if ".tsv" in name else ","
+
+
+def _candidate_score(target_address: str, public_address: str) -> tuple[str, int]:
+    if target_address and public_address and target_address == public_address:
+        return "name_address_exact", 100
+    if target_address and public_address and (
+        target_address.startswith(public_address) or public_address.startswith(target_address)
+    ):
+        return "name_address_prefix", 80
+    return "name_only", 20
+
+
+def _candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, str]:
+    return (-int(candidate["match_score"]), clean(candidate["corporate_number"]))
+
+
+def _public_candidate(row: dict[str, str], method: str, score: int) -> dict[str, Any]:
+    return {
+        "corporate_number": clean(row.get("corporate_number")),
+        "public_company_name": clean(row.get("company_name")),
+        "company_name_kana": clean(row.get("company_name_kana")),
+        "post_code": clean(row.get("post_code")),
+        "prefecture_name": clean(row.get("prefecture_name")),
+        "city_name": clean(row.get("city_name")),
+        "street_number": clean(row.get("street_number")),
+        "public_address": clean(row.get("full_address")),
+        "company_url": clean(row.get("company_url")),
+        "representative_name": clean(row.get("representative_name")),
+        "employee_number": clean(row.get("employee_number")),
+        "capital_stock": clean(row.get("capital_stock")),
+        "business_summary": clean(row.get("business_summary")),
+        "jsic_middle_codes": clean(row.get("jsic_middle_codes")),
+        "nta_update_date": clean(row.get("nta_update_date")),
+        "match_method": method,
+        "match_score": score,
+    }
 
 
 def match_index(
@@ -170,150 +223,134 @@ def match_index(
     accept_prefix: bool = False,
 ) -> dict[str, Any]:
     targets = read_targets(targets_csv)
-    connection = duckdb.connect()
-    try:
-        connection.execute("PRAGMA threads=4")
-        _register_targets(connection, targets)
-        _install_normalizers(connection)
-        connection.execute(
-            """
-            CREATE TEMP TABLE candidate_matches AS
-            WITH public_index AS (
-                SELECT
-                    corporate_number,
-                    company_name AS public_company_name,
-                    post_code,
-                    prefecture_name,
-                    city_name,
-                    street_number,
-                    full_address AS public_address,
-                    nta_update_date,
-                    py_norm_name(company_name) AS name_norm,
-                    py_norm_address(full_address) AS address_norm
-                FROM read_parquet(?)
-            ),
-            scored AS (
-                SELECT
-                    t.source_id,
-                    t.company_name,
-                    t.address,
-                    p.corporate_number,
-                    p.public_company_name,
-                    p.post_code,
-                    p.prefecture_name,
-                    p.city_name,
-                    p.street_number,
-                    p.public_address,
-                    p.nta_update_date,
-                    CASE
-                        WHEN t.address_norm = p.address_norm THEN 'name_address_exact'
-                        WHEN starts_with(t.address_norm, p.address_norm)
-                          OR starts_with(p.address_norm, t.address_norm)
-                        THEN 'name_address_prefix'
-                        ELSE 'name_only'
-                    END AS match_method,
-                    CASE
-                        WHEN t.address_norm = p.address_norm THEN 100
-                        WHEN starts_with(t.address_norm, p.address_norm)
-                          OR starts_with(p.address_norm, t.address_norm)
-                        THEN 80
-                        ELSE 20
-                    END AS match_score
-                FROM targets t
-                JOIN public_index p ON t.name_norm = p.name_norm
-            )
-            SELECT
-                *,
-                count(*) OVER(PARTITION BY source_id, match_score) AS same_score_candidates,
-                row_number() OVER(
-                    PARTITION BY source_id
-                    ORDER BY match_score DESC, corporate_number
-                ) AS candidate_rank
-            FROM scored
-            """,
-            [str(public_index)],
-        )
-        records = connection.execute(
-            """
-            SELECT
-                t.source_id,
-                t.company_name,
-                t.address,
-                c.corporate_number,
-                c.public_company_name,
-                c.post_code,
-                c.prefecture_name,
-                c.city_name,
-                c.street_number,
-                c.public_address,
-                c.nta_update_date,
-                c.match_method,
-                c.match_score,
-                c.same_score_candidates,
-                CASE
-                    WHEN c.match_method = 'name_address_exact'
-                     AND c.same_score_candidates = 1 THEN 'accepted'
-                    WHEN ?
-                     AND c.match_method = 'name_address_prefix'
-                     AND c.same_score_candidates = 1 THEN 'accepted_prefix'
-                    WHEN c.corporate_number IS NULL THEN 'unmatched'
-                    ELSE 'review'
-                END AS status
-            FROM targets t
-            LEFT JOIN candidate_matches c
-              ON c.source_id=t.source_id AND c.candidate_rank=1
-            ORDER BY t.source_id
-            """,
-            [accept_prefix],
-        ).fetchall()
-        columns = [column[0] for column in connection.description]
+    targets_by_name: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for target in targets:
+        targets_by_name[target["name_norm"]].append(target)
 
-        review_rows = connection.execute(
-            """
-            SELECT
-                source_id,
-                company_name,
-                address,
-                corporate_number,
-                public_company_name,
-                post_code,
-                public_address,
-                nta_update_date,
-                match_method,
-                match_score,
-                same_score_candidates,
-                candidate_rank
-            FROM candidate_matches
-            WHERE candidate_rank <= 10
-              AND NOT (
-                  match_method = 'name_address_exact'
-                  AND same_score_candidates = 1
-              )
-            ORDER BY source_id, match_score DESC, corporate_number
-            """
-        ).fetchall()
-        review_columns = [column[0] for column in connection.description]
-    finally:
-        connection.close()
+    candidates: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    public_rows = 0
+    matching_name_rows = 0
+    with open_public_index(public_index) as handle:
+        reader = csv.DictReader(handle, delimiter=public_delimiter(public_index))
+        required = {"corporate_number", "company_name", "full_address"}
+        missing = sorted(required - set(reader.fieldnames or []))
+        if missing:
+            raise ValueError("public index is missing columns: " + ", ".join(missing))
+        for public_rows, row in enumerate(reader, start=1):
+            name_norm = normalize_name(row.get("company_name"))
+            matched_targets = targets_by_name.get(name_norm)
+            if not matched_targets:
+                continue
+            matching_name_rows += 1
+            public_address_norm = normalize_address(row.get("full_address"))
+            for target in matched_targets:
+                method, score = _candidate_score(target["address_norm"], public_address_norm)
+                candidate = _public_candidate(row, method, score)
+                bucket = candidates[target["source_id"]]
+                bucket.append(candidate)
+                bucket.sort(key=_candidate_sort_key)
+                if len(bucket) > MAX_REVIEW_CANDIDATES:
+                    del bucket[MAX_REVIEW_CANDIDATES:]
+            if public_rows % 1_000_000 == 0:
+                print(
+                    json.dumps(
+                        {
+                            "public_rows_scanned": public_rows,
+                            "public_rows_with_target_name": matching_name_rows,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+
+    output_fields = [
+        "source_id",
+        "company_name",
+        "address",
+        "corporate_number",
+        "public_company_name",
+        "company_name_kana",
+        "post_code",
+        "prefecture_name",
+        "city_name",
+        "street_number",
+        "public_address",
+        "company_url",
+        "representative_name",
+        "employee_number",
+        "capital_stock",
+        "business_summary",
+        "jsic_middle_codes",
+        "nta_update_date",
+        "match_method",
+        "match_score",
+        "same_score_candidates",
+        "status",
+    ]
+    result_rows: list[dict[str, Any]] = []
+    review_rows: list[dict[str, Any]] = []
+    counts: dict[str, int] = defaultdict(int)
+
+    for target in targets:
+        bucket = sorted(candidates.get(target["source_id"], []), key=_candidate_sort_key)
+        if not bucket:
+            best: dict[str, Any] = {}
+            same_score = 0
+            status = "unmatched"
+        else:
+            best = bucket[0]
+            best_score = int(best["match_score"])
+            same_score = sum(int(candidate["match_score"]) == best_score for candidate in bucket)
+            if best["match_method"] == "name_address_exact" and same_score == 1:
+                status = "accepted"
+            elif (
+                accept_prefix
+                and best["match_method"] == "name_address_prefix"
+                and same_score == 1
+            ):
+                status = "accepted_prefix"
+            else:
+                status = "review"
+        counts[status] += 1
+        result_rows.append(
+            {
+                "source_id": target["source_id"],
+                "company_name": target["company_name"],
+                "address": target["address"],
+                **best,
+                "same_score_candidates": same_score,
+                "status": status,
+            }
+        )
+        if status == "review":
+            for rank, candidate in enumerate(bucket, start=1):
+                review_rows.append(
+                    {
+                        "source_id": target["source_id"],
+                        "company_name": target["company_name"],
+                        "address": target["address"],
+                        **candidate,
+                        "same_score_candidates": same_score,
+                        "candidate_rank": rank,
+                    }
+                )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding=CSV_ENCODING, newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(columns)
-        writer.writerows(records)
+        writer = csv.DictWriter(handle, fieldnames=output_fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(result_rows)
+
+    review_fields = output_fields[:-1] + ["candidate_rank"]
     review_output.parent.mkdir(parents=True, exist_ok=True)
     with review_output.open("w", encoding=CSV_ENCODING, newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(review_columns)
+        writer = csv.DictWriter(handle, fieldnames=review_fields, extrasaction="ignore")
+        writer.writeheader()
         writer.writerows(review_rows)
 
-    status_index = columns.index("status")
-    counts: dict[str, int] = {}
-    for record in records:
-        status = clean(record[status_index])
-        counts[status] = counts.get(status, 0) + 1
     result = {
         "targets": len(targets),
+        "public_rows_scanned": public_rows,
+        "public_rows_with_target_name": matching_name_rows,
         "accepted": counts.get("accepted", 0),
         "accepted_prefix": counts.get("accepted_prefix", 0),
         "review": counts.get("review", 0),
