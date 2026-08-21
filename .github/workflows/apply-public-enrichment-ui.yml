@@ -13,7 +13,9 @@ permissions:
 
 jobs:
   apply-and-verify:
-    if: github.head_ref == 'feat/public-enrichment-desktop'
+    if: >-
+      github.head_ref == 'feat/public-enrichment-desktop' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-latest
     defaults:
       run:
@@ -21,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: feat/public-enrichment-desktop
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
@@ -72,7 +74,11 @@ jobs:
                   destination = (extracted / member.name).resolve()
                   if extracted not in destination.parents and destination != extracted:
                       raise RuntimeError(f"unsafe archive path: {member.name}")
-              bundle.extractall(extracted)
+                  if member.issym() or member.islnk():
+                      raise RuntimeError(f"archive links are not allowed: {member.name}")
+                  if not (member.isdir() or member.isfile()):
+                      raise RuntimeError(f"unsupported archive entry: {member.name}")
+              bundle.extractall(extracted, filter="data")
           for item in extracted.iterdir():
               destination = root / item.name
               if item.is_dir():
@@ -115,7 +121,7 @@ jobs:
       - name: Rust tests
         shell: pwsh
         run: |
-          $resource = Join-Path $PWD "resources/bin/codex.exe"
+          $resource = Join-Path $PWD "src-tauri/resources/bin/codex.exe"
           $created = -not (Test-Path $resource)
           if ($created) {
             New-Item -ItemType Directory -Path (Split-Path $resource) -Force | Out-Null
@@ -150,6 +156,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          $workflow = Join-Path $PWD "../.github/workflows/apply-public-enrichment-ui.yml"
+          if (Test-Path $workflow) {
+            Remove-Item $workflow -Force
+          }
           git add -A
           git diff --cached --quiet
           if ($LASTEXITCODE -eq 0) {
