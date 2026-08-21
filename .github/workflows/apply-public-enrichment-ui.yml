@@ -101,7 +101,21 @@ jobs:
           python scripts/apply_public_enrichment_ui.py
           Remove-Item scripts/apply_public_enrichment_ui.py
           Remove-Item .integration -Recurse -Force
-          rustfmt --edition 2021 src-tauri/src/lib.rs src-tauri/src/public_enrichment.rs
+          # Formatting lib.rs recursively traverses sibling modules on Windows and rewrites
+          # their line endings. The generated lib.rs splice is already formatted; format only
+          # the standalone generated module and reject any unexpected Rust source mutation.
+          rustfmt --edition 2021 src-tauri/src/public_enrichment.rs
+          $allowedRustPaths = @(
+            "company_scout/src-tauri/src/lib.rs"
+            "company_scout/src-tauri/src/public_enrichment.rs"
+          )
+          $unexpectedRustPaths = @(
+            git -C .. diff --name-only -- company_scout/src-tauri/src
+          ) | Where-Object { $_ -and $_ -notin $allowedRustPaths }
+          if ($unexpectedRustPaths) {
+            $unexpectedRustPaths | ForEach-Object { Write-Error "Unexpected Rust source mutation: $_" }
+            throw "Refusing to continue after an unrelated Rust source changed."
+          }
 
       - name: Install Python dependencies
         shell: pwsh
