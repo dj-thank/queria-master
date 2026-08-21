@@ -14,6 +14,18 @@ from typing import Any, Iterable
 from urllib.parse import urlparse
 
 CSV_ENCODING = "utf-8-sig"
+PHONE_TYPE_PRIORITY = {
+    "代表電話": 0,
+    "本社電話": 1,
+    "問い合わせ電話": 2,
+    "支店・事業所": 3,
+    "サポート窓口": 4,
+    "広報・IR窓口": 5,
+    "採用窓口": 6,
+    "個人情報・相談窓口": 7,
+    "未分類": 8,
+    "FAX": 9,
+}
 
 
 def clean(value: Any) -> str:
@@ -90,9 +102,9 @@ def prepare_shard(
     database.parent.mkdir(parents=True, exist_ok=True)
     if database.exists():
         database.unlink()
-    con = sqlite3.connect(database)
+    connection = sqlite3.connect(database)
     try:
-        con.executescript(
+        connection.executescript(
             """
             PRAGMA foreign_keys = ON;
             CREATE TABLE companies(
@@ -115,26 +127,26 @@ def prepare_shard(
         )
         manifest_rows: list[dict[str, Any]] = []
         for local_index, row in enumerate(selected, start=offset):
-            sid = source_id(row, local_index)
+            local_source_id = source_id(row, local_index)
             corporate_number = clean(row.get("corporate_number"))
             company_name = clean(row.get("company_name")) or corporate_number
             address = clean(row.get("prefecture_name")) + clean(row.get("city_name"))
             website = normalize_url(row.get("company_url"))
-            con.execute(
+            connection.execute(
                 "INSERT INTO companies(source_id,source_row,company_name,address,security_code) VALUES(?,?,?,?,?)",
-                (sid, local_index + 1, company_name, address, ""),
+                (local_source_id, local_index + 1, company_name, address, ""),
             )
-            con.execute(
+            connection.execute(
                 "INSERT INTO corporate_matches(source_id,corporate_number,status) VALUES(?,?,?)",
-                (sid, corporate_number, "accepted"),
+                (local_source_id, corporate_number, "accepted"),
             )
-            con.execute(
+            connection.execute(
                 "INSERT OR REPLACE INTO public_master(corporate_number,website_url) VALUES(?,?)",
                 (corporate_number, website),
             )
             manifest_rows.append(
                 {
-                    "SOURCE_ID": sid,
+                    "SOURCE_ID": local_source_id,
                     "法人番号": corporate_number,
                     "企業名": company_name,
                     "都道府県": clean(row.get("prefecture_name")),
@@ -145,10 +157,10 @@ def prepare_shard(
                     "優先順位": local_index + 1,
                 }
             )
-        con.commit()
-        integrity = con.execute("PRAGMA integrity_check").fetchone()[0]
+        connection.commit()
+        integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
     finally:
-        con.close()
+        connection.close()
 
     manifest_fields = [
         "SOURCE_ID",
@@ -193,6 +205,19 @@ def _expand_patterns(patterns: list[str]) -> list[Path]:
     return sorted(paths)
 
 
+def _candidate_key(row: dict[str, str]) -> tuple[float, int, int, int]:
+    confidence = float(clean(row.get("信頼度")) or 0)
+    rank = as_int(row.get("候補順位")) or 999999
+    phone_type = clean(row.get("電話種別候補")) or "未分類"
+    evidence = int(bool(clean(row.get("根拠テキスト"))))
+    return (
+        confidence,
+        -PHONE_TYPE_PRIORITY.get(phone_type, 8),
+        evidence,
+        -rank,
+    )
+
+
 def merge_batches(
     *,
     all_companies_csv: Path,
@@ -210,31 +235,37 @@ def merge_batches(
         for row in read_csv(path):
             processed.add(clean(row.get("法人番号")))
 
-    phones: dict[str, dict[str, str]] = {}
+    candidates_by_company: dict[str, dict[str, dict[str, str]]] = {}
     for path in phone_paths:
         for row in read_csv(path):
             corporate_number = clean(row.get("法人番号"))
-            if not corporate_number:
+            phone_digits = re.sub(r"\D", "", clean(row.get("電話番号")))
+            if not corporate_number or not phone_digits:
                 continue
-            current = phones.get(corporate_number)
-            candidate_confidence = float(clean(row.get("信頼度")) or 0)
-            current_confidence = float(clean(current.get("信頼度")) or 0) if current else -1
-            if current is None or candidate_confidence > current_confidence:
-                phones[corporate_number] = row
+            company_candidates = candidates_by_company.setdefault(corporate_number, {})
+            current = company_candidates.get(phone_digits)
+            if current is None or _candidate_key(row) > _candidate_key(current):
+                company_candidates[phone_digits] = row
 
     output_rows: list[dict[str, Any]] = []
-    website_count = phone_count = processed_count = 0
+    website_count = processed_count = companies_with_phone = candidate_total = 0
     for row in all_rows:
         corporate_number = clean(row.get("corporate_number"))
         website = normalize_url(row.get("company_url"))
-        phone = phones.get(corporate_number, {})
+        candidates = sorted(
+            candidates_by_company.get(corporate_number, {}).values(),
+            key=_candidate_key,
+            reverse=True,
+        )
+        best = candidates[0] if candidates else {}
         if website:
             website_count += 1
         if corporate_number in processed:
             processed_count += 1
-        if clean(phone.get("電話番号")):
-            phone_count += 1
-        if clean(phone.get("電話番号")):
+        if candidates:
+            companies_with_phone += 1
+            candidate_total += len(candidates)
+        if candidates:
             status = "phone_candidate_found"
         elif corporate_number in processed:
             status = "processed_no_phone"
@@ -242,6 +273,21 @@ def merge_batches(
             status = "website_pending"
         else:
             status = "website_missing"
+
+        candidate_payload = [
+            {
+                "rank": index,
+                "phone": clean(candidate.get("電話番号")),
+                "phone_digits": re.sub(r"\D", "", clean(candidate.get("電話番号"))),
+                "candidate_type": clean(candidate.get("電話種別候補")) or "未分類",
+                "evidence_url": clean(candidate.get("根拠URL")),
+                "evidence_text": clean(candidate.get("根拠テキスト")),
+                "extraction_method": clean(candidate.get("抽出方法")),
+                "confidence": clean(candidate.get("信頼度")),
+                "fetched_at": clean(candidate.get("取得日時")),
+            }
+            for index, candidate in enumerate(candidates, start=1)
+        ]
         output_rows.append(
             {
                 "法人番号": corporate_number,
@@ -255,12 +301,15 @@ def merge_batches(
                 "代表者": clean(row.get("representative_name")),
                 "公式サイトURL": website,
                 "事業概要": clean(row.get("business_summary")),
-                "電話番号候補": clean(phone.get("電話番号")),
-                "電話番号数字": re.sub(r"\D", "", clean(phone.get("電話番号"))),
-                "電話根拠URL": clean(phone.get("根拠URL")),
-                "電話根拠テキスト": clean(phone.get("根拠テキスト")),
-                "電話信頼度": clean(phone.get("信頼度")),
-                "電話取得日時": clean(phone.get("取得日時")),
+                "電話番号候補": clean(best.get("電話番号")),
+                "電話番号数字": re.sub(r"\D", "", clean(best.get("電話番号"))),
+                "電話種別候補": clean(best.get("電話種別候補")),
+                "電話根拠URL": clean(best.get("根拠URL")),
+                "電話根拠テキスト": clean(best.get("根拠テキスト")),
+                "電話信頼度": clean(best.get("信頼度")),
+                "電話取得日時": clean(best.get("取得日時")),
+                "電話候補件数": len(candidates),
+                "電話候補一覧JSON": json.dumps(candidate_payload, ensure_ascii=False, separators=(",", ":")),
                 "収集状態": status,
             }
         )
@@ -279,10 +328,13 @@ def merge_batches(
         "事業概要",
         "電話番号候補",
         "電話番号数字",
+        "電話種別候補",
         "電話根拠URL",
         "電話根拠テキスト",
         "電話信頼度",
         "電話取得日時",
+        "電話候補件数",
+        "電話候補一覧JSON",
         "収集状態",
     ]
     write_csv(output, fields, output_rows)
@@ -290,7 +342,8 @@ def merge_batches(
         "companies": len(all_rows),
         "companies_with_web": website_count,
         "processed_for_phone": processed_count,
-        "phone_candidates_found": phone_count,
+        "companies_with_phone_candidates": companies_with_phone,
+        "phone_candidates_total": candidate_total,
         "manifest_files": [str(path) for path in manifest_paths],
         "phone_files": [str(path) for path in phone_paths],
         "output": str(output),
@@ -303,9 +356,9 @@ def merge_batches(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="JSIC 39 public contact collection helpers")
-    sub = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    prepare = sub.add_parser("prepare-shard")
+    prepare = subparsers.add_parser("prepare-shard")
     prepare.add_argument("--companies", type=Path, required=True)
     prepare.add_argument("--db", type=Path, required=True)
     prepare.add_argument("--manifest", type=Path, required=True)
@@ -313,7 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--offset", type=int, default=0)
     prepare.add_argument("--limit", type=int, default=100)
 
-    merge = sub.add_parser("merge")
+    merge = subparsers.add_parser("merge")
     merge.add_argument("--all-companies", type=Path, required=True)
     merge.add_argument("--manifest", action="append", default=[], required=True)
     merge.add_argument("--phones", action="append", default=[], required=True)
