@@ -40,11 +40,12 @@ jobs:
           name: CompanyMaster-build-log
           path: company_scout/build.log
           if-no-files-found: warn
-      - name: Upload Windows installers
+      - name: Upload Windows app and installers
         uses: actions/upload-artifact@v4
         with:
           name: CompanyMaster-Windows
           path: |
+            company_scout/src-tauri/target/release/CompanyMaster-G37-41.exe
             company_scout/src-tauri/target/release/bundle/**/*.exe
             company_scout/src-tauri/target/release/bundle/**/*.msi
           if-no-files-found: error

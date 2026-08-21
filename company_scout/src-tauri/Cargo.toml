@@ -21,7 +21,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt-multi-thread", "macros", "net"] }
 duckdb = { version = "1.10505.0", features = ["bundled", "parquet", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
@@ -32,3 +32,8 @@ anyhow = "1"
 csv = "1"
 rust_xlsxwriter = "0.98.2"
 regex = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

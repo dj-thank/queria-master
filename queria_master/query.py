@@ -9,7 +9,13 @@ from typing import Any, Iterable, Sequence
 from .pipeline import PipelineError
 from .resources import DEFAULT_DB
 from .runtime import DEFAULT_RUNTIME_DB
-from .search_index import DEFAULT_SEARCH_INDEX, SearchIndex, SearchIndexError
+from .search_index import (
+    DEFAULT_SEARCH_INDEX,
+    SearchIndex,
+    SearchIndexError,
+    SearchQueryError,
+    validate_search_keyword,
+)
 from .semantic_index import (
     DEFAULT_SEMANTIC_INDEX,
     SemanticIndex,
@@ -321,6 +327,10 @@ def search_companies(
 ) -> int:
     if not 1 <= limit <= 100_000:
         raise PipelineError("--limit は 1〜100000 の範囲で指定してください。")
+    try:
+        validate_search_keyword(keyword)
+    except SearchQueryError as exc:
+        raise PipelineError(str(exc)) from exc
     normalized_majors = tuple(str(value).strip().upper() for value in industry_majors)
     invalid_majors = sorted({value for value in normalized_majors if not re.fullmatch(r"[A-T]", value)})
     if invalid_majors:
