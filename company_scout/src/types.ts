@@ -99,6 +99,33 @@ export type DataStatus = {
   duckdb_version?: string | null;
 };
 
+export type PublicEnrichmentStatus = {
+  available: boolean;
+  python_version?: string | null;
+  script_path: string;
+  workspace_dir: string;
+  db_path: string;
+  input_dir: string;
+  output_dir: string;
+  companies: number;
+  accepted_matches: number;
+  review_matches: number;
+  public_master: number;
+  financial_history: number;
+  workplace_info: number;
+  edinet_metrics: number;
+  site_contacts: number;
+  source_audit: number;
+  integrity: string;
+  error?: string | null;
+};
+
+export type PublicEnrichmentOperation = {
+  action: string;
+  result: Record<string, unknown>;
+  status: PublicEnrichmentStatus;
+};
+
 export type SalesforceStatus = {
   connected: boolean;
   username?: string | null;

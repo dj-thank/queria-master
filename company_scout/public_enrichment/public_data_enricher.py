@@ -528,13 +528,18 @@ def load_shared_strings(zf: zipfile.ZipFile) -> list[str]:
 
 def resolve_sheet_path(zf: zipfile.ZipFile, sheet_name: str) -> str:
     wb_root = ET.fromstring(zf.read("xl/workbook.xml"))
-    rel_id = None
-    for sheet in wb_root.findall(f".//{{{XLS_NS}}}sheet"):
-        if sheet.attrib.get("name") == sheet_name:
-            rel_id = sheet.attrib.get(f"{{{REL_NS}}}id")
-            break
+    sheets = wb_root.findall(f".//{{{XLS_NS}}}sheet")
+    selected = None
+    if sheet_name:
+        selected = next((sheet for sheet in sheets if sheet.attrib.get("name") == sheet_name), None)
+    elif sheets:
+        selected = sheets[0]
+    if selected is None:
+        label = sheet_name or "先頭シート"
+        raise ValueError(f"シートが見つかりません: {label}")
+    rel_id = selected.attrib.get(f"{{{REL_NS}}}id")
     if not rel_id:
-        raise ValueError(f"シートが見つかりません: {sheet_name}")
+        raise ValueError("シートの関連IDがありません")
     rel_root = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
     for rel in rel_root.findall(f"{{{PKG_REL_NS}}}Relationship"):
         if rel.attrib.get("Id") == rel_id:
@@ -709,7 +714,7 @@ def _insert_company_batch(con: sqlite3.Connection, batch: Sequence[tuple[Any, ..
 def prepare_from_xlsx(
     con: sqlite3.Connection,
     xlsx: Path,
-    sheet_name: str = "企業DB",
+    sheet_name: str = "",
     replace: bool = False,
 ) -> dict[str, Any]:
     rows = iter_xlsx_rows(xlsx, sheet_name)
@@ -750,7 +755,7 @@ def prepare_input(
     con: sqlite3.Connection,
     input_path: Path,
     *,
-    sheet_name: str = "企業DB",
+    sheet_name: str = "",
     replace: bool = False,
 ) -> dict[str, Any]:
     suffix = input_path.suffix.lower()
@@ -1685,7 +1690,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db",type=Path,default=DEFAULT_DB)
     sub=p.add_subparsers(dest="command",required=True)
     sp=sub.add_parser("prepare",help="CSV/XLSXからローカルSQLiteを作成")
-    sp.add_argument("input",type=Path); sp.add_argument("--sheet",default="企業DB"); sp.add_argument("--replace",action="store_true")
+    sp.add_argument("input",type=Path); sp.add_argument("--sheet",default=""); sp.add_argument("--replace",action="store_true")
     sm=sub.add_parser("make-assignment",help="法人番号付与用CSVを生成")
     sm.add_argument("--output",type=Path,default=Path("法人番号付与用.csv")); sm.add_argument("--chunk-size",type=int,default=10000)
     si=sub.add_parser("import",help="公開CSV/ZIPを取込")

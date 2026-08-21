@@ -30,6 +30,7 @@ import type {
   Company,
   DataStatus,
   ResearchReport,
+  PublicEnrichmentStatus,
   SalesforceStatus,
   SalesforceFieldMapping,
   SalesforceJobStatus,
@@ -120,6 +121,7 @@ function App() {
   const [research, setResearch] = useState<ResearchReport | null>(null);
   const [codex, setCodex] = useState<CodexStatus | null>(null);
   const [data, setData] = useState<DataStatus | null>(null);
+  const [publicEnrichment, setPublicEnrichment] = useState<PublicEnrichmentStatus | null>(null);
   const [salesforce, setSalesforce] = useState<SalesforceStatus | null>(null);
   const [salesforceJob, setSalesforceJob] = useState<SalesforceJobStatus | null>(null);
   const [sfObjectName, setSfObjectName] = useState("Account");
@@ -131,6 +133,8 @@ function App() {
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
   const [fieldCategory, setFieldCategory] = useState<"region" | "industry" | "organization" | "scale" | "keywords">("region");
   const [listScrollTop, setListScrollTop] = useState(0);
+  const [enrichmentSheet, setEnrichmentSheet] = useState("");
+  const [enrichmentReplace, setEnrichmentReplace] = useState(false);
   const listScrollRef = useRef<HTMLDivElement>(null);
 
   const displayRows = result?.rows ?? [];
@@ -160,17 +164,19 @@ function App() {
 
   async function refreshStatus() {
     try {
-      const [d, c, sf, memories] = await Promise.allSettled([
+      const [d, c, sf, memories, enrichment] = await Promise.allSettled([
         api.bootstrap(),
         api.codexStatus(),
         api.salesforceStatus(),
         api.recentSearches(12),
+        api.publicEnrichmentStatus(),
       ]);
       if (d.status === "fulfilled") setData(d.value);
       if (d.status === "rejected") setMessage(`データ状態を取得できませんでした: ${String(d.reason)}`);
       if (c.status === "fulfilled") setCodex(c.value);
       if (sf.status === "fulfilled") setSalesforce(sf.value);
       if (memories.status === "fulfilled") setSavedSearches(memories.value);
+      if (enrichment.status === "fulfilled") setPublicEnrichment(enrichment.value);
     } catch (error) {
       setMessage(String(error));
     }
@@ -336,6 +342,54 @@ function App() {
       const value = await api.syncDuckDb();
       setMessage(`${fmt.format(value.imported)}件をDuckDBネイティブ同期しました（${value.duckdb_version}）。`);
       await refreshStatus();
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function preparePublicEnrichment() {
+    const file = await open({ multiple: false, filters: [{ name: "企業リスト", extensions: ["csv", "xlsx", "xlsm"] }] });
+    if (!file || Array.isArray(file)) return;
+    setBusy("public-prepare");
+    setMessage("");
+    try {
+      const value = await api.publicEnrichmentPrepare(file, enrichmentSheet.trim() || null, enrichmentReplace);
+      setPublicEnrichment(value.status);
+      setMessage(`企業リスト ${fmt.format(value.status.companies)}件を公開データ作業DBへ準備しました。`);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function makePublicAssignment() {
+    const path = await save({ defaultPath: "corporate-number-assignment.csv", filters: [{ name: "CSV", extensions: ["csv"] }] });
+    if (!path) return;
+    setBusy("public-assignment");
+    setMessage("");
+    try {
+      const value = await api.publicEnrichmentMakeAssignment(path, 10000);
+      setPublicEnrichment(value.status);
+      setMessage(`法人番号付与用CSVを出力しました: ${path}`);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function runPublicEnrichment() {
+    const directory = await open({ directory: true, multiple: false });
+    if (!directory || Array.isArray(directory)) return;
+    setBusy("public-run");
+    setMessage("");
+    try {
+      const value = await api.publicEnrichmentRunAll(directory);
+      setPublicEnrichment(value.status);
+      setMessage(`公開情報を統合しました。法人番号確定 ${fmt.format(value.status.accepted_matches)}件、要確認 ${fmt.format(value.status.review_matches)}件。`);
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -641,6 +695,25 @@ function App() {
               </ConnectionCard>
               <ConnectionCard icon={<Database size={20} />} title="DuckDB Native / 公開法人データ" status={data?.duckdb_native ? (data.runtime_attached ? "Queria全量を接続中" : (data.duckdb_version || "組み込み済み")) : "初期化中"} ok={!!data?.duckdb_native} description={data?.runtime_attached ? "Queria runtime DB（約582万法人）をDuckDB純正のREAD_ONLY接続で参照中。検索メモリー・リスト・調査メモだけをCompanyMaster側へ保存します。" : "Queria CLIを使わず、組み込みDuckDBがDuckLakeをREAD_ONLYで直接ATTACH。国税庁法人番号＋gBizINFOを法人番号でJOINし、ローカルDuckDBへ高速キャッシュ。"}>
                 <div className="button-row wrap"><button className="primary" onClick={syncDuckDb} disabled={busy === "duckdb"}>{busy === "duckdb" ? <Loader2 className="spin" size={15}/> : <RefreshCw size={15}/>}DuckDB同期</button><button className="ghost" onClick={importCompanies}><Upload size={15}/>DuckDB/Parquet読込</button><button className="ghost" onClick={importTaxonomy}><Upload size={15}/>産業分類</button></div>
+              </ConnectionCard>
+              <ConnectionCard icon={<FileSearch size={20} />} title="公開データ統合" status={publicEnrichment?.available ? (publicEnrichment.companies > 0 ? `${fmt.format(publicEnrichment.companies)}社準備済み` : "実行可能") : "Python 3.11+が必要"} ok={!!publicEnrichment?.available} description="企業CSV/XLSXを法人番号で照合し、公的・公式情報を元列とは別に追加します。欠損値は推測せず、出典と要確認理由を保持します。">
+                <div className="enrichment-stats">
+                  <span>企業<strong>{fmt.format(publicEnrichment?.companies ?? 0)}</strong></span>
+                  <span>法人番号確定<strong>{fmt.format(publicEnrichment?.accepted_matches ?? 0)}</strong></span>
+                  <span>要確認<strong>{fmt.format(publicEnrichment?.review_matches ?? 0)}</strong></span>
+                  <span>公開マスタ<strong>{fmt.format(publicEnrichment?.public_master ?? 0)}</strong></span>
+                </div>
+                <div className="enrichment-controls">
+                  <label><span>Excelシート名（空欄なら先頭）</span><input value={enrichmentSheet} onChange={(e) => setEnrichmentSheet(e.target.value)} placeholder="任意" /></label>
+                  <label className="check-row"><input type="checkbox" checked={enrichmentReplace} onChange={(e) => setEnrichmentReplace(e.target.checked)} /><span>既存の公開データ作業DBを作り直す</span></label>
+                </div>
+                <div className="button-row wrap">
+                  <button className="primary" onClick={preparePublicEnrichment} disabled={!!busy || !publicEnrichment?.available}>{busy === "public-prepare" ? <Loader2 className="spin" size={15}/> : <Upload size={15}/>}企業リスト</button>
+                  <button className="ghost" onClick={makePublicAssignment} disabled={!!busy || !publicEnrichment?.available || !publicEnrichment.companies}><Download size={15}/>法人番号CSV</button>
+                  <button className="ghost" onClick={runPublicEnrichment} disabled={!!busy || !publicEnrichment?.available || !publicEnrichment.companies}>{busy === "public-run" ? <Loader2 className="spin" size={15}/> : <RefreshCw size={15}/>}公開データ統合</button>
+                </div>
+                {publicEnrichment?.error && <small className="enrichment-error">{publicEnrichment.error}</small>}
+                {publicEnrichment && <small className="enrichment-path">出力: {publicEnrichment.output_dir}</small>}
               </ConnectionCard>
               <ConnectionCard icon={<CloudSalesforce />} title="Salesforce" status={salesforce?.connected ? "接続済み" : "未接続"} ok={!!salesforce?.connected} description="External Client App + Authorization Code/PKCE。法人番号を外部IDにしてBulk API 2.0でUpsert。">
                 <SalesforceConnect connected={!!salesforce?.connected} onMessage={setMessage} onRefresh={refreshStatus} />

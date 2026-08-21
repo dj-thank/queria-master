@@ -97,7 +97,8 @@ python public_data_enricher.py prepare companies.csv --replace
 XLSX:
 
 ```bash
-python public_data_enricher.py prepare companies.xlsx --sheet 企業DB --replace
+python public_data_enricher.py prepare companies.xlsx --replace
+# 先頭以外のシートを使う場合だけ: --sheet "対象シート名"
 ```
 
 既存DBを作り直す場合だけ `--replace` を使用してください。

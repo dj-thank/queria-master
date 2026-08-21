@@ -1,12 +1,14 @@
 mod codex;
 mod db;
-mod models;
 mod duckdb_native;
+mod models;
+mod public_enrichment;
 mod salesforce;
 
 use codex::CodexManager;
 use db::Db;
 use models::{CodexStatus, Company, DataStatus, ResearchReport, SalesforceStatus, SavedSearch, SearchPlan, SearchResult};
+use public_enrichment::{PublicEnrichmentManager, PublicEnrichmentOperation, PublicEnrichmentStatus};
 use salesforce::SalesforceManager;
 use serde::Serialize;
 use regex::Regex;
@@ -17,6 +19,7 @@ use url::Url;
 struct AppState {
     db: Db,
     codex: CodexManager,
+    public_enrichment: PublicEnrichmentManager,
     salesforce: SalesforceManager,
 }
 
@@ -199,6 +202,50 @@ async fn import_industry_taxonomy(state: State<'_, AppState>, path: String) -> R
 }
 
 #[tauri::command]
+async fn public_enrichment_status(state: State<'_, AppState>) -> Result<PublicEnrichmentStatus, String> {
+    Ok(state.public_enrichment.status().await)
+}
+
+#[tauri::command]
+async fn public_enrichment_prepare(
+    state: State<'_, AppState>,
+    source_path: String,
+    sheet_name: Option<String>,
+    replace: bool,
+) -> Result<PublicEnrichmentOperation, String> {
+    state
+        .public_enrichment
+        .prepare(std::path::Path::new(&source_path), sheet_name.as_deref(), replace)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn public_enrichment_make_assignment(
+    state: State<'_, AppState>,
+    output_path: String,
+    chunk_size: u32,
+) -> Result<PublicEnrichmentOperation, String> {
+    state
+        .public_enrichment
+        .make_assignment(std::path::Path::new(&output_path), chunk_size)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn public_enrichment_run_all(
+    state: State<'_, AppState>,
+    input_dir: String,
+) -> Result<PublicEnrichmentOperation, String> {
+    state
+        .public_enrichment
+        .run_all(std::path::Path::new(&input_dir), false)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
 async fn salesforce_status(state: State<'_, AppState>) -> Result<SalesforceStatus, String> { Ok(state.salesforce.status().await) }
 
 #[tauri::command]
@@ -258,9 +305,11 @@ pub fn run() {
             std::fs::write(workspace.join("AGENTS.md"), include_str!("../../agent-workspace/AGENTS.md"))?;
 
             let codex = CodexManager::new(app_data_dir.clone(), workspace);
+            let public_enrichment = PublicEnrichmentManager::new(app_data_dir.clone(), resource_dir.clone())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
             let salesforce = SalesforceManager::new()
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-            app.manage(AppState { db, codex, salesforce });
+            app.manage(AppState { db, codex, public_enrichment, salesforce });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -268,6 +317,7 @@ pub fn run() {
             codex_status, codex_login, codex_logout, codex_plan_search, codex_research_company,
             collect_company_phone,
             duckdb_native_status, sync_duckdb_company_master, import_company_file, import_industry_taxonomy,
+            public_enrichment_status, public_enrichment_prepare, public_enrichment_make_assignment, public_enrichment_run_all,
             salesforce_status, salesforce_login_start, salesforce_upsert_list, salesforce_job_status, salesforce_retry_failed
         ])
         .run(tauri::generate_context!())
