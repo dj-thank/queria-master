@@ -1,0 +1,84 @@
+name: Assemble public enrichment hardening
+
+on:
+  push:
+    branches:
+      - hardening/public-enrichment-v1.1
+    paths:
+      - .github/workflows/assemble-public-enrichment.yml
+      - company_scout/public_enrichment/.assembly/bundle.b64
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: hardening/public-enrichment-v1.1
+          fetch-depth: 0
+
+      - name: Assemble files when bundle exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE="company_scout/public_enrichment/.assembly/bundle.b64"
+          if [[ ! -f "$BUNDLE" ]]; then
+            echo "Bundle not present yet; nothing to assemble."
+            exit 0
+          fi
+
+          python - <<'PY'
+          import base64
+          import shutil
+          import tarfile
+          import tempfile
+          from pathlib import Path
+
+          repo = Path.cwd().resolve()
+          bundle = repo / "company_scout/public_enrichment/.assembly/bundle.b64"
+          archive = Path(tempfile.mkdtemp()) / "bundle.tar.gz"
+          archive.write_bytes(base64.b64decode(bundle.read_text(encoding="ascii"), validate=True))
+          extract_root = Path(tempfile.mkdtemp()).resolve()
+
+          with tarfile.open(archive, "r:gz") as tf:
+              for member in tf.getmembers():
+                  destination = (extract_root / member.name).resolve()
+                  if extract_root not in destination.parents and destination != extract_root:
+                      raise RuntimeError(f"unsafe archive path: {member.name}")
+              tf.extractall(extract_root)
+
+          target = repo / "company_scout/public_enrichment"
+          for item in extract_root.iterdir():
+              if item.name == ".github":
+                  continue
+              destination = target / item.name
+              if destination.exists() and destination.is_dir():
+                  shutil.rmtree(destination)
+              elif destination.exists():
+                  destination.unlink()
+              if item.is_dir():
+                  shutil.copytree(item, destination)
+              else:
+                  shutil.copy2(item, destination)
+
+          workflow = extract_root / ".github/workflows/public-enrichment-tests.yml"
+          workflow_target = repo / ".github/workflows/public-enrichment-tests.yml"
+          workflow_target.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(workflow, workflow_target)
+          PY
+
+          rm -rf company_scout/public_enrichment/.assembly
+          rm -f .github/workflows/assemble-public-enrichment.yml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "fix: harden public company enrichment pipeline"
+          git push origin HEAD:hardening/public-enrichment-v1.1
