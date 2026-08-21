@@ -38,6 +38,10 @@ jobs:
           rustup default stable
           rustup component add rustfmt
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: company_scout/src-tauri -> target
+
       - name: Assemble and apply verified integration patch
         shell: pwsh
         run: |
@@ -110,7 +114,19 @@ jobs:
 
       - name: Rust tests
         shell: pwsh
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+        run: |
+          $resource = Join-Path $PWD "resources/bin/codex.exe"
+          $created = -not (Test-Path $resource)
+          if ($created) {
+            New-Item -ItemType Directory -Path (Split-Path $resource) -Force | Out-Null
+            [System.IO.File]::WriteAllBytes($resource, [byte[]]@())
+          }
+          try {
+            cargo test --manifest-path src-tauri/Cargo.toml --lib
+            if ($LASTEXITCODE -ne 0) { throw "Rust tests failed with exit code $LASTEXITCODE" }
+          } finally {
+            if ($created -and (Test-Path $resource)) { Remove-Item $resource -Force }
+          }
 
       - name: Source-neutrality scan
         shell: pwsh
