@@ -1,0 +1,7 @@
+{
+  "start_offset": 0,
+  "batch_size": 400,
+  "max_pages": 4,
+  "rows_per_zip": 5000,
+  "release_tag": "jsic39-public-contacts-20260821-batch0000"
+}
