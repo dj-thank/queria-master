@@ -31,7 +31,7 @@ data/queria_master.duckdb
 ```text
 data/queria_master.duckdb          更新用の正規公開スナップショット
 data/queria_enrichment.duckdb      更新用の証拠・状態・抑止層
-             │  build-runtime（読み取り専用入力、原子的出力）
+             │  publish-runtime（読み取り専用入力、同一generation公開）
              ▼
 data/queria_runtime.duckdb         利用時に跨ぐDBはこれ一つ
   ├─ core / raw / gbizinfo / edinet / mhlw / p_portal / metro_tokyo
@@ -42,6 +42,22 @@ data/queria_runtime.duckdb         利用時に跨ぐDBはこれ一つ
 ```
 
 この二層構成は速度と更新安全性の折衷ではなく、役割を分けた構成です。更新側は出典を失わない正規形を保持し、利用側は必要な列と現在値を同一DuckDBへ物理化します。したがって、利用時の法人検索・カテゴリ絞り込み・営業リスト作成は別DBへの毎回のJOINを必要としません。SQLite FTS5は全文候補の選別だけを担当し、最終的な値・証拠・抑止判定は統合DuckDBから読みます。
+
+履歴Hojinjoho活動情報ZIPは別経路です。
+
+```text
+Hojinjoho ZIP（top-level JSON array）
+             │  全member metadata・JSON payload・record検証、展開上限、SHA-256
+             ▼
+.<staging-name>.<uuid>.building
+             │  完了後にatomic no-clobber hard link
+             ▼
+gbiz_archive staging DuckDB
+  ├─ import_runs / archive_members
+  └─ companies / activities
+```
+
+このstagingは非正本で、`core.*` / `gbizinfo.*` / runtime / 検索索引へ自動昇格しません。Basic CSV取込も対象外です。安全性と正規化は合成ZIPで自動テストしています。別途復元できた companion 監査記録には379,025,154 bytesなどの値がありますが、元ZIP本体は取得できず、現 importer の完走検証は未実施です。詳細は [`GBIZ_ARCHIVE_IMPORT_JA.md`](GBIZ_ARCHIVE_IMPORT_JA.md) を参照してください。
 
 全公開スコープのローカル構成:
 

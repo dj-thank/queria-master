@@ -44,7 +44,9 @@ struct SortSpec {
 pub struct Db {
     path: PathBuf,
     runtime_path: Option<PathBuf>,
+    runtime_fallback_path: Option<PathBuf>,
     search_index_path: Option<PathBuf>,
+    search_index_fallback_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,7 +65,9 @@ impl Db {
         Self {
             path,
             runtime_path: None,
+            runtime_fallback_path: None,
             search_index_path: None,
+            search_index_fallback_path: None,
         }
     }
 
@@ -74,12 +78,27 @@ impl Db {
         Self {
             path,
             runtime_path: Some(runtime_path),
+            runtime_fallback_path: None,
             search_index_path: None,
+            search_index_fallback_path: None,
         }
+    }
+
+    pub fn with_runtime_fallback(mut self, runtime_fallback_path: Option<PathBuf>) -> Self {
+        self.runtime_fallback_path = runtime_fallback_path;
+        self
     }
 
     pub fn with_search_index(mut self, search_index_path: Option<PathBuf>) -> Self {
         self.search_index_path = search_index_path;
+        self
+    }
+
+    pub fn with_search_index_fallback(
+        mut self,
+        search_index_fallback_path: Option<PathBuf>,
+    ) -> Self {
+        self.search_index_fallback_path = search_index_fallback_path;
         self
     }
 
@@ -88,7 +107,14 @@ impl Db {
     }
 
     pub fn runtime_path(&self) -> Option<&Path> {
-        self.runtime_path.as_deref()
+        self.runtime_path
+            .as_deref()
+            .filter(|runtime_path| runtime_path.is_file())
+            .or_else(|| {
+                self.runtime_fallback_path
+                    .as_deref()
+                    .filter(|runtime_path| runtime_path.is_file())
+            })
     }
 
     pub(crate) fn connect(&self) -> Result<Connection> {
@@ -99,7 +125,9 @@ impl Db {
             .with_context(|| format!("DuckDBを開けません: {}", self.path.display()))?;
         conn.execute_batch("PRAGMA enable_progress_bar=false;")?;
 
-        if let Some(runtime_path) = &self.runtime_path {
+        let runtime_path = self.runtime_path();
+        let runtime_attached = runtime_path.is_some();
+        if let Some(runtime_path) = runtime_path {
             attach_runtime(&conn, runtime_path)?;
             migrate_company_relation(&conn, true)?;
         } else {
@@ -236,7 +264,7 @@ impl Db {
             "#,
         )?;
 
-        if self.runtime_path.is_some() {
+        if runtime_attached {
             ensure_runtime_view(&conn)?;
         } else {
             conn.execute_batch(
@@ -274,9 +302,10 @@ impl Db {
 
     pub fn status(&self, duckdb_version: Option<String>) -> Result<DataStatus> {
         let conn = self.connect()?;
-        let g_runtime = self.runtime_path.is_some() && is_g_fuma_runtime(&conn);
+        let runtime_attached = self.runtime_available();
+        let g_runtime = runtime_attached && is_g_fuma_runtime(&conn);
         let search_index = self.inspect_search_index(Some(&conn));
-        let company_count: i64 = if self.runtime_path.is_some() {
+        let company_count: i64 = if runtime_attached {
             let table = if g_runtime {
                 "queria_runtime.core.g_companies"
             } else {
@@ -320,7 +349,7 @@ impl Db {
                     ))
                 },
             )?
-        } else if self.runtime_path.is_some() {
+        } else if runtime_attached {
             conn.query_row(
                 "SELECT
                    (SELECT count(DISTINCT corporate_number) FROM queria_runtime.core.company_industries),
@@ -361,7 +390,7 @@ impl Db {
             research_count: research_count.max(0) as u64,
             db_path: self.path.display().to_string(),
             duckdb_native: true,
-            runtime_attached: self.runtime_path.is_some(),
+            runtime_attached,
             duckdb_version,
             search_index_available: search_index.available,
             search_index_path: search_index
@@ -501,7 +530,7 @@ impl Db {
     }
 
     fn inspect_search_index(&self, runtime_conn: Option<&Connection>) -> SearchIndexState {
-        let Some(configured_path) = self.search_index_path.as_ref() else {
+        let Some(configured_path) = self.configured_search_index_path() else {
             return SearchIndexState {
                 available: false,
                 path: None,
@@ -522,7 +551,7 @@ impl Db {
             Err(error) => {
                 return SearchIndexState {
                     available: false,
-                    path: Some(configured_path.clone()),
+                    path: Some(configured_path.to_path_buf()),
                     status: format!("unreadable: {error}"),
                     row_count: None,
                 }
@@ -546,7 +575,7 @@ impl Db {
     }
 
     fn validate_search_index(&self, path: &Path, runtime_conn: Option<&Connection>) -> Result<u64> {
-        if self.runtime_path.is_none() {
+        if !self.runtime_available() {
             return Err(anyhow!(
                 "検索索引を照合するQueriaランタイムDBが接続されていません"
             ));
@@ -576,10 +605,7 @@ impl Db {
             .parse::<u64>()
             .context("row_countメタデータが数値ではありません")?;
 
-        let runtime_path = self
-            .runtime_path
-            .as_ref()
-            .context("ランタイムDBがありません")?;
+        let runtime_path = self.runtime_path().context("ランタイムDBがありません")?;
         let conn = runtime_conn.context("ランタイムDB接続がありません")?;
         let runtime_row_count: i64 = conn
             .query_row(
@@ -1046,7 +1072,7 @@ impl Db {
             "INSERT INTO research_reports(id,corporate_number,company_name,thread_id,report_json) VALUES(?,?,?,?,?)",
             duckdb::params![id, report.corporate_number, report.company_name, report.thread_id, json],
         )?;
-        if self.runtime_path.is_none() {
+        if !self.runtime_available() {
             if let Some(guess) = &report.industry_guess {
                 conn.execute(
                     r#"UPDATE companies SET inferred_industry_code=?, inferred_industry_name=?,
@@ -1064,7 +1090,7 @@ impl Db {
     }
 
     pub fn import_canonical_file(&self, path: &Path) -> Result<u64> {
-        if self.runtime_path.is_some() {
+        if self.runtime_available() {
             return Err(anyhow!(
                 "QueriaランタイムDBはREAD_ONLY接続です。取り込みはCompanyMaster側のローカルDBで実行してください"
             ));
@@ -1141,6 +1167,23 @@ impl Db {
         exec_result?;
         let after: i64 = conn.query_row("SELECT count(*) FROM companies", [], |r| r.get(0))?;
         Ok((after - before).max(0) as u64)
+    }
+
+    fn runtime_available(&self) -> bool {
+        self.runtime_path().is_some()
+    }
+
+    fn configured_search_index_path(&self) -> Option<&Path> {
+        self.search_index_path
+            .as_deref()
+            .filter(|path| path.is_file())
+            .or_else(|| {
+                self.search_index_fallback_path
+                    .as_deref()
+                    .filter(|path| path.is_file())
+            })
+            .or(self.search_index_path.as_deref())
+            .or(self.search_index_fallback_path.as_deref())
     }
 
     pub fn import_taxonomy_file(&self, path: &Path) -> Result<u64> {
@@ -1817,7 +1860,7 @@ fn ensure_runtime_view(conn: &Connection) -> Result<()> {
           coalesce(try_cast(base.capital_stock AS BIGINT), try_cast(contacts.capital_stock AS BIGINT)) AS capital,
           coalesce(try_cast(base.founding_year AS INTEGER), try_cast(contacts.founding_year AS INTEGER)) AS established_year,
           coalesce(nullif(contacts.effective_company_url, ''), nullif(base.company_url, ''), nullif(contacts.company_url, '')) AS website,
-          coalesce(nullif(local_contacts.phone, ''), nullif(contacts.phone, '')) AS phone,
+          coalesce(nullif(contacts.phone, ''), nullif(local_contacts.phone, '')) AS phone,
           coalesce(nullif(base.representative_name, ''), contacts.representative_name) AS representative,
           coalesce(nullif(base.business_summary, ''), contacts.business_summary) AS business_summary,
           base.business_items_raw AS business_items,
@@ -2174,6 +2217,38 @@ mod tests {
             .expect("clear samples");
         drop(connection);
         (directory, db)
+    }
+
+    #[test]
+    fn publication_runtime_target_replaces_bundled_fallback_when_it_appears() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let target = directory.path().join("queria_runtime.duckdb");
+        let fallback = directory.path().join("queria_runtime_g_fuma.duckdb");
+        std::fs::write(&fallback, b"bundled").expect("create bundled runtime");
+        let db = Db::with_runtime(
+            directory.path().join("company-master.duckdb"),
+            target.clone(),
+        )
+        .with_runtime_fallback(Some(fallback.clone()));
+
+        assert_eq!(db.runtime_path(), Some(fallback.as_path()));
+        std::fs::write(&target, b"published").expect("create published runtime");
+        assert_eq!(db.runtime_path(), Some(target.as_path()));
+    }
+
+    #[test]
+    fn publication_index_target_replaces_bundled_fallback_when_it_appears() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let target = directory.path().join("search.sqlite");
+        let fallback = directory.path().join("search_g_fuma.sqlite");
+        std::fs::write(&fallback, b"bundled").expect("create bundled index");
+        let db = Db::new(directory.path().join("company-master.duckdb"))
+            .with_search_index(Some(target.clone()))
+            .with_search_index_fallback(Some(fallback.clone()));
+
+        assert_eq!(db.configured_search_index_path(), Some(fallback.as_path()));
+        std::fs::write(&target, b"published").expect("create published index");
+        assert_eq!(db.configured_search_index_path(), Some(target.as_path()));
     }
 
     #[test]

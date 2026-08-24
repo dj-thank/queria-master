@@ -125,7 +125,7 @@ DuckDBのART索引は等価条件や選択性の高い検索に有効ですが�
 ### P0 — 安全性とデータ経路
 
 1. **公式サイト電話収集の運用境界を完成する。** 実ネットワークでDNS rebinding、複数A/AAAA、各種リダイレクト、chunked巨大応答を統合試験し、robots.txt・利用規約・取得頻度の方針を決める。満たせない配布では機能を無効化する（[#19](https://github.com/dj-thank/queria-master/issues/19)）。
-2. **Public enrichmentをcanonicalなruntime/index更新へ接続する。** 独立パイプラインの結果をUIだけへ継ぎ足さず、出典・レビュー状態を保ったままenrichment → runtime → search indexの世代更新へ載せる。既存PRの失敗CIとバイナリ同梱方式も整理する（[#10](https://github.com/dj-thank/queria-master/issues/10)）。
+2. **Public enrichment公開経路を配布環境で検証する。** staging SQLite → 証拠付きenrichment → runtime → search indexの同一世代更新は接続済み。Windows配布では `QUERIA_MASTER_CLI`、canonical/enrichment/runtime/indexの実パス、途中障害時のDuckDB fallbackをスモーク試験する（[#10](https://github.com/dj-thank/queria-master/issues/10)）。
 3. **世代不一致を運用上も復旧可能にする。** UIにruntime/indexのパス、世代、状態、再構築コマンドを示し、誤って古い索引を使わないまま利用者が復旧できるようにする。
 
 ### P1 — 判断品質と大量処理

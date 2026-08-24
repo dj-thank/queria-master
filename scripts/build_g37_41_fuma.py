@@ -30,7 +30,7 @@ import duckdb
 from openpyxl import load_workbook
 
 
-PACKAGE_VERSION = "0.10.0"
+PACKAGE_VERSION = "0.10.1"
 GIT_REF = os.environ.get("QUERIA_GIT_REF", f"working-tree@v{PACKAGE_VERSION}")
 DEFAULT_XLSX = Path(os.environ.get("QUERIA_FUMA_XLSX", "data/import/fuma_g37_41.xlsx"))
 DEFAULT_MASTER = Path("data/queria_master.duckdb")

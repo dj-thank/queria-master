@@ -15,19 +15,24 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from .resources import DEFAULT_DB, PROJECT_ROOT
 
 
-ENRICHMENT_SCHEMA_VERSION = "3"
+ENRICHMENT_SCHEMA_VERSION = "6"
 DEFAULT_ENRICHMENT_DB = PROJECT_ROOT / "data" / "queria_enrichment.duckdb"
 ENRICHMENT_STATES = frozenset(
     {
         "pending",
         "leased",
         "found",
+        "verified",
+        "waiting_for_dependency",
         "not_found_after_policy",
         "not_applicable",
         "needs_review",
         "blocked_by_policy",
         "failed",
     }
+)
+ENRICHMENT_TASK_FIELDS = frozenset(
+    {"website_discovery", "website_verification", "contact_extraction", "location"}
 )
 CONTACT_TYPES = frozenset({"phone", "email", "fax", "form_url"})
 WEBSITE_ROLES = frozenset({"official_candidate", "official_homepage", "contact_page", "form_page"})
@@ -208,7 +213,9 @@ def normalize_url(value: Any, *, base_url: str | None = None) -> str:
         port = parts.port
     except (UnicodeError, ValueError) as exc:
         raise EnrichmentError(f"URLのホスト名またはポートが不正です: {value}") from exc
-    netloc = host
+    # urlunsplit requires bracketed IPv6 literals; IDNA hostnames and IPv4 do
+    # not contain a colon.
+    netloc = f"[{host}]" if ":" in host else host
     if port and not ((parts.scheme.lower() == "http" and port == 80) or (parts.scheme.lower() == "https" and port == 443)):
         netloc += f":{port}"
     path = parts.path or "/"
@@ -335,6 +342,19 @@ CREATE TABLE IF NOT EXISTS enrichment.company_contact_points (
     UNIQUE (corporate_number, contact_type, value_normalized)
 );
 
+CREATE TABLE IF NOT EXISTS enrichment.contact_reviews (
+    review_id VARCHAR PRIMARY KEY,
+    contact_id VARCHAR NOT NULL,
+    corporate_number VARCHAR NOT NULL,
+    contact_type VARCHAR NOT NULL,
+    value_normalized VARCHAR NOT NULL,
+    previous_sales_eligibility VARCHAR NOT NULL,
+    decision VARCHAR NOT NULL,
+    reviewer VARCHAR NOT NULL,
+    reason VARCHAR NOT NULL,
+    reviewed_at TIMESTAMPTZ NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS enrichment.company_locations (
     location_id VARCHAR PRIMARY KEY,
     corporate_number VARCHAR NOT NULL,
@@ -381,6 +401,7 @@ CREATE TABLE IF NOT EXISTS enrichment.enrichment_state (
     policy_code VARCHAR,
     worker_run_id VARCHAR,
     lease_owner VARCHAR,
+    lease_token VARCHAR,
     lease_until TIMESTAMPTZ,
     next_attempt_at TIMESTAMPTZ,
     last_started_at TIMESTAMPTZ,
@@ -413,6 +434,8 @@ CREATE INDEX IF NOT EXISTS idx_enrichment_contacts_corporate
     ON enrichment.company_contact_points(corporate_number, contact_type, status);
 CREATE INDEX IF NOT EXISTS idx_enrichment_contacts_value
     ON enrichment.company_contact_points(contact_type, value_normalized);
+CREATE INDEX IF NOT EXISTS idx_enrichment_contact_reviews_contact
+    ON enrichment.contact_reviews(contact_id, reviewed_at);
 CREATE INDEX IF NOT EXISTS idx_enrichment_establishment_company
     ON enrichment.company_establishments(corporate_number, status);
 CREATE INDEX IF NOT EXISTS idx_enrichment_establishment_phone
@@ -425,6 +448,87 @@ CREATE INDEX IF NOT EXISTS idx_compliance_suppressions_corporate
 
 
 VIEW_SQL_TEMPLATE = """
+CREATE OR REPLACE VIEW crm.v_resolved_company_websites AS
+SELECT
+    corporate_number,
+    normalized_url AS official_url,
+    source_evidence_id,
+    status,
+    confidence,
+    checked_at
+FROM enrichment.company_websites
+WHERE status = 'verified'
+  AND website_role = 'official_homepage'
+QUALIFY row_number() OVER (
+    PARTITION BY corporate_number
+    ORDER BY confidence DESC NULLS LAST,
+             checked_at DESC NULLS LAST,
+             first_seen_at DESC,
+             normalized_url,
+             website_id
+) = 1;
+
+CREATE OR REPLACE VIEW crm.v_resolved_company_contacts AS
+SELECT
+    p.corporate_number,
+    p.contact_type,
+    p.value_normalized,
+    p.source_evidence_id,
+    p.source_url,
+    p.observed_at,
+    p.status,
+    p.confidence,
+    p.verification_status,
+    p.sales_eligibility
+FROM enrichment.company_contact_points p
+WHERE p.status IN ('found', 'verified')
+  AND p.sales_eligibility = 'allowed'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM compliance.suppressions s
+      WHERE (s.corporate_number = p.corporate_number OR s.corporate_number IS NULL)
+        AND (
+            (s.suppression_type = p.contact_type AND s.value_sha256 = sha256(p.value_normalized))
+            OR (
+                s.suppression_type = 'domain'
+                AND p.contact_type = 'email'
+                AND split_part(p.value_normalized, '@', 2) = s.value_normalized
+            )
+        )
+        AND (s.effective_from IS NULL OR s.effective_from <= current_timestamp)
+        AND (s.effective_to IS NULL OR s.effective_to > current_timestamp)
+  )
+QUALIFY row_number() OVER (
+    PARTITION BY p.corporate_number, p.contact_type
+    ORDER BY CASE WHEN p.status = 'verified' THEN 0 ELSE 1 END,
+             p.confidence DESC NULLS LAST,
+             p.observed_at DESC,
+             p.value_normalized,
+             p.contact_id
+) = 1;
+
+CREATE OR REPLACE VIEW crm.v_resolved_company_locations AS
+SELECT
+    corporate_number,
+    address_normalized,
+    postal_code,
+    prefecture_name,
+    city_name,
+    source_evidence_id,
+    status,
+    confidence,
+    observed_at
+FROM enrichment.company_locations
+WHERE status IN ('found', 'verified')
+QUALIFY row_number() OVER (
+    PARTITION BY corporate_number
+    ORDER BY CASE WHEN status = 'verified' THEN 0 ELSE 1 END,
+             confidence DESC NULLS LAST,
+             observed_at DESC,
+             address_normalized,
+             location_id
+) = 1;
+
 CREATE OR REPLACE VIEW crm.v_enrichment_coverage AS
 WITH latest_states AS (
     SELECT corporate_number, field_name, state, updated_at, last_completed_at
@@ -436,7 +540,12 @@ WITH latest_states AS (
 ), states AS (
     SELECT
         corporate_number,
-        max(CASE WHEN field_name = 'website' THEN state END) AS website_state,
+        coalesce(
+            max(CASE WHEN field_name = 'website_verification' THEN state END),
+            max(CASE WHEN field_name = 'website_discovery' THEN state END),
+            max(CASE WHEN field_name = 'website' THEN state END)
+        ) AS website_state,
+        max(CASE WHEN field_name = 'contact_extraction' THEN state END) AS contact_extraction_state,
         max(CASE WHEN field_name = 'phone' THEN state END) AS phone_state,
         max(CASE WHEN field_name = 'email' THEN state END) AS email_state,
         max(CASE WHEN field_name = 'form_url' THEN state END) AS form_state,
@@ -447,13 +556,18 @@ WITH latest_states AS (
 ), contact_flags AS (
     SELECT
         corporate_number,
-        max(CASE WHEN contact_type = 'phone' AND status = 'found' THEN 1 ELSE 0 END) AS has_phone,
-        max(CASE WHEN contact_type = 'email' AND status = 'found' THEN 1 ELSE 0 END) AS has_email,
-        max(CASE WHEN contact_type = 'form_url' AND status = 'found' THEN 1 ELSE 0 END) AS has_form,
-        max(CASE WHEN contact_type = 'phone' AND status = 'found' AND sales_eligibility = 'allowed' THEN 1 ELSE 0 END) AS has_allowed_phone,
-        max(CASE WHEN contact_type = 'email' AND status = 'found' AND sales_eligibility = 'allowed' THEN 1 ELSE 0 END) AS has_allowed_email,
-        max(CASE WHEN contact_type = 'form_url' AND status = 'found' AND sales_eligibility = 'allowed' THEN 1 ELSE 0 END) AS has_allowed_form
+        max(CASE WHEN contact_type = 'phone' AND status IN ('found', 'verified') THEN 1 ELSE 0 END) AS has_phone,
+        max(CASE WHEN contact_type = 'email' AND status IN ('found', 'verified') THEN 1 ELSE 0 END) AS has_email,
+        max(CASE WHEN contact_type = 'form_url' AND status IN ('found', 'verified') THEN 1 ELSE 0 END) AS has_form
     FROM enrichment.company_contact_points
+    GROUP BY corporate_number
+), resolved_flags AS (
+    SELECT
+        corporate_number,
+        max(CASE WHEN contact_type = 'phone' THEN 1 ELSE 0 END) AS has_allowed_phone,
+        max(CASE WHEN contact_type = 'email' THEN 1 ELSE 0 END) AS has_allowed_email,
+        max(CASE WHEN contact_type = 'form_url' THEN 1 ELSE 0 END) AS has_allowed_form
+    FROM crm.v_resolved_company_contacts
     GROUP BY corporate_number
 )
 SELECT
@@ -463,9 +577,10 @@ SELECT
     c.city_name,
     c.company_url AS canonical_company_url,
     coalesce(s.website_state, 'pending') AS website_state,
-    coalesce(s.phone_state, 'pending') AS phone_state,
-    coalesce(s.email_state, 'pending') AS email_state,
-    coalesce(s.form_state, 'pending') AS form_state,
+    coalesce(s.contact_extraction_state, 'waiting_for_dependency') AS contact_extraction_state,
+    coalesce(s.phone_state, s.contact_extraction_state, 'waiting_for_dependency') AS phone_state,
+    coalesce(s.email_state, s.contact_extraction_state, 'waiting_for_dependency') AS email_state,
+    coalesce(s.form_state, s.contact_extraction_state, 'waiting_for_dependency') AS form_state,
     coalesce(s.location_state, 'pending') AS location_state,
     coalesce(f.has_phone, 0) = 1 AS has_phone,
     coalesce(f.has_email, 0) = 1 AS has_email,
@@ -484,65 +599,40 @@ SELECT
               AND (x.effective_from IS NULL OR x.effective_from <= current_timestamp)
               AND (x.effective_to IS NULL OR x.effective_to > current_timestamp)
         ) THEN 'blocked_by_policy'
-        WHEN coalesce(f.has_allowed_phone, 0) = 1
-          OR coalesce(f.has_allowed_email, 0) = 1
-          OR coalesce(f.has_allowed_form, 0) = 1 THEN 'ready'
+        WHEN coalesce(r.has_allowed_phone, 0) = 1
+          OR coalesce(r.has_allowed_email, 0) = 1
+          OR coalesce(r.has_allowed_form, 0) = 1 THEN 'ready'
         WHEN coalesce(s.website_state, 'pending') IN ('pending', 'leased')
-          OR coalesce(s.phone_state, 'pending') IN ('pending', 'leased')
-          OR coalesce(s.email_state, 'pending') IN ('pending', 'leased')
-          OR coalesce(s.form_state, 'pending') IN ('pending', 'leased') THEN 'pending'
+          OR coalesce(s.contact_extraction_state, 'pending') IN ('pending', 'leased')
+          OR coalesce(s.phone_state, s.contact_extraction_state, 'waiting_for_dependency') IN ('pending', 'leased')
+          OR coalesce(s.email_state, s.contact_extraction_state, 'waiting_for_dependency') IN ('pending', 'leased')
+          OR coalesce(s.form_state, s.contact_extraction_state, 'waiting_for_dependency') IN ('pending', 'leased') THEN 'pending'
         WHEN coalesce(s.website_state, '') = 'needs_review'
-          OR coalesce(s.phone_state, '') = 'needs_review'
-          OR coalesce(s.email_state, '') = 'needs_review'
-          OR coalesce(s.form_state, '') = 'needs_review' THEN 'needs_review'
+          OR coalesce(s.phone_state, s.contact_extraction_state, '') = 'needs_review'
+          OR coalesce(s.email_state, s.contact_extraction_state, '') = 'needs_review'
+          OR coalesce(s.form_state, s.contact_extraction_state, '') = 'needs_review' THEN 'needs_review'
         ELSE 'not_found_after_policy'
     END AS sales_state
 FROM __COMPANY_RELATION__ c
 LEFT JOIN states s USING (corporate_number)
-LEFT JOIN contact_flags f USING (corporate_number);
+LEFT JOIN contact_flags f USING (corporate_number)
+LEFT JOIN resolved_flags r USING (corporate_number);
 
 CREATE OR REPLACE VIEW crm.v_sales_ready_accounts AS
 WITH allowed_contacts AS (
     SELECT
-        p.corporate_number,
-        max(CASE WHEN p.contact_type = 'phone' THEN p.value_normalized END) AS phone,
-        max(CASE WHEN p.contact_type = 'email' THEN p.value_normalized END) AS email,
-        max(CASE WHEN p.contact_type = 'form_url' THEN p.value_normalized END) AS inquiry_form_url
-    FROM enrichment.company_contact_points p
-    WHERE p.status = 'found'
-      AND p.sales_eligibility = 'allowed'
-      AND NOT EXISTS (
-          SELECT 1 FROM compliance.suppressions s
-          WHERE (s.corporate_number = p.corporate_number OR s.corporate_number IS NULL)
-            AND (
-                (s.suppression_type = p.contact_type AND s.value_sha256 = sha256(p.value_normalized))
-                OR (
-                    s.suppression_type = 'domain'
-                    AND p.contact_type = 'email'
-                    AND split_part(p.value_normalized, '@', 2) = s.value_normalized
-                )
-            )
-            AND (s.effective_from IS NULL OR s.effective_from <= current_timestamp)
-            AND (s.effective_to IS NULL OR s.effective_to > current_timestamp)
-      )
-    GROUP BY p.corporate_number
+        corporate_number,
+        max(CASE WHEN contact_type = 'phone' THEN value_normalized END) AS phone,
+        max(CASE WHEN contact_type = 'email' THEN value_normalized END) AS email,
+        max(CASE WHEN contact_type = 'form_url' THEN value_normalized END) AS inquiry_form_url
+    FROM crm.v_resolved_company_contacts
+    GROUP BY corporate_number
 ), websites AS (
-    SELECT corporate_number, normalized_url AS official_url
-    FROM enrichment.company_websites
-    WHERE status = 'verified'
-      AND website_role = 'official_homepage'
-    QUALIFY row_number() OVER (
-        PARTITION BY corporate_number
-        ORDER BY confidence DESC NULLS LAST, checked_at DESC NULLS LAST, first_seen_at DESC
-    ) = 1
+    SELECT corporate_number, official_url
+    FROM crm.v_resolved_company_websites
 ), locations AS (
     SELECT corporate_number, address_normalized, postal_code, prefecture_name, city_name
-    FROM enrichment.company_locations
-    WHERE status IN ('found', 'verified')
-    QUALIFY row_number() OVER (
-        PARTITION BY corporate_number
-        ORDER BY confidence DESC NULLS LAST, observed_at DESC
-    ) = 1
+    FROM crm.v_resolved_company_locations
 )
 SELECT
     c.corporate_number,
@@ -601,8 +691,37 @@ def initialize_enrichment_schema(con: Any, *, company_relation: str = "core.comp
         "input_fingerprint VARCHAR",
         "policy_code VARCHAR",
         "worker_run_id VARCHAR",
+        "lease_token VARCHAR",
     ):
         con.execute(_local_sql(con, f"ALTER TABLE enrichment.enrichment_state ADD COLUMN IF NOT EXISTS {column}"))
+    # Schema v6 makes contact_reviews the authority for privileged sales
+    # decisions. Older databases could contain allowed/not_allowed values
+    # written without an audit row. Preserve the latest genuine review and fail
+    # closed to review when no decision can be proven.
+    con.execute(
+        _local_sql(
+            con,
+            """
+            UPDATE enrichment.company_contact_points AS p
+            SET sales_eligibility = coalesce(
+                (
+                    SELECT r.decision
+                    FROM enrichment.contact_reviews AS r
+                    WHERE r.contact_id = p.contact_id
+                    ORDER BY r.reviewed_at DESC, r.review_id DESC
+                    LIMIT 1
+                ),
+                'review'
+            )
+            WHERE p.sales_eligibility IN ('allowed', 'not_allowed')
+               OR EXISTS (
+                    SELECT 1
+                    FROM enrichment.contact_reviews AS r
+                    WHERE r.contact_id = p.contact_id
+               )
+            """,
+        )
+    )
     con.execute(
         _local_sql(
             con,
@@ -995,9 +1114,27 @@ def seed_enrichment(
             INSERT INTO enrichment.enrichment_state(
                 corporate_number, field_name, source_key, state, attempt_count, updated_at
             )
-            SELECT s.corporate_number, f.field_name, ?, 'pending', 0, current_timestamp
+            SELECT
+                s.corporate_number,
+                f.field_name,
+                ?,
+                CASE
+                    WHEN f.field_name = 'website_discovery'
+                        AND nullif(trim(c.company_url), '') IS NOT NULL THEN 'found'
+                    WHEN f.field_name = 'website_verification'
+                        AND nullif(trim(c.company_url), '') IS NOT NULL THEN 'pending'
+                    WHEN f.field_name IN ('website_verification', 'contact_extraction')
+                        THEN 'waiting_for_dependency'
+                    ELSE 'pending'
+                END,
+                0,
+                current_timestamp
             FROM {seed_source} s
-            CROSS JOIN (VALUES ('website'), ('phone'), ('email'), ('form_url'), ('location')) f(field_name)
+            JOIN canonical.core.companies c USING (corporate_number)
+            CROSS JOIN (
+                VALUES ('website_discovery'), ('website_verification'),
+                       ('contact_extraction'), ('location')
+            ) f(field_name)
             ON CONFLICT (corporate_number, field_name, source_key) DO NOTHING
             """),
             [source_key],
@@ -1061,7 +1198,7 @@ def seed_enrichment(
                 updated_at = current_timestamp
             FROM _enrichment_seed_web w
             WHERE st.corporate_number = w.corporate_number
-              AND st.field_name = 'website'
+              AND st.field_name = 'website_discovery'
               AND st.source_key = ?
             """),
             [source_key],
@@ -1287,6 +1424,23 @@ def _upsert_state(
     policy_code: str | None = None,
     worker_run_id: str | None = None,
 ) -> None:
+    leased = bool(
+        _execute_local(
+            con,
+            """
+            SELECT count(*) > 0
+            FROM enrichment.enrichment_state
+            WHERE corporate_number = ? AND field_name = ? AND source_key = ?
+              AND state = 'leased'
+            """,
+            [corporate_number, field_name, source_key],
+        ).fetchone()[0]
+    )
+    if leased:
+        # A generic importer may add evidence while a worker is running, but
+        # it must never steal or complete that worker's lease. Worker results
+        # use the owner-checked CAS helper below.
+        return
     con.execute(
         _local_sql(
             con,
@@ -1305,6 +1459,7 @@ def _upsert_state(
             last_error = excluded.last_error,
             last_evidence_id = excluded.last_evidence_id,
             lease_owner = NULL,
+            lease_token = NULL,
             lease_until = NULL,
             updated_at = excluded.updated_at
         """,
@@ -1323,14 +1478,185 @@ def _upsert_state(
     )
 
 
+def _complete_leased_state(
+    con: Any,
+    corporate_number: str,
+    field_name: str,
+    source_key: str,
+    state: str,
+    lease_owner: str,
+    lease_token: str,
+    evidence_id: str | None,
+    error: str | None,
+    *,
+    input_fingerprint: str | None = None,
+    policy_code: str | None = None,
+    worker_run_id: str | None = None,
+) -> None:
+    row = _execute_local(
+        con,
+        """
+        UPDATE enrichment.enrichment_state
+        SET state = ?, input_fingerprint = coalesce(?, input_fingerprint),
+            policy_code = coalesce(?, policy_code),
+            worker_run_id = coalesce(?, worker_run_id),
+            last_completed_at = current_timestamp, last_error = ?,
+            last_evidence_id = ?, lease_owner = NULL, lease_token = NULL,
+            lease_until = NULL,
+            updated_at = current_timestamp
+        WHERE corporate_number = ? AND field_name = ? AND source_key = ?
+          AND state = 'leased' AND lease_owner = ? AND lease_token = ?
+        RETURNING corporate_number
+        """,
+        [
+            state,
+            input_fingerprint,
+            policy_code,
+            worker_run_id,
+            error,
+            evidence_id,
+            corporate_number,
+            field_name,
+            source_key,
+            lease_owner,
+            lease_token,
+        ],
+    ).fetchone()
+    if row is None:
+        raise EnrichmentError(
+            "タスクleaseの所有者が変わったため、古いworker結果を破棄しました。"
+        )
+
+
+def _ensure_pipeline_task(
+    con: Any,
+    corporate_number: str,
+    field_name: str,
+    state: str,
+    evidence_id: str | None,
+    *,
+    input_fingerprint: str | None = None,
+    source_key: str = "official_site",
+) -> None:
+    """Advance a staged website task without replaying completed work.
+
+    A new input fingerprint requeues downstream work.  Re-importing the same
+    candidate is idempotent, and an active lease is never stolen.
+    """
+
+    _execute_local(
+        con,
+        """
+        INSERT INTO enrichment.enrichment_state(
+            corporate_number, field_name, source_key, state, attempt_count,
+            input_fingerprint, last_completed_at, last_evidence_id, updated_at
+        ) VALUES (?, ?, ?, ?, 0, ?,
+                  CASE WHEN ? IN ('found', 'verified') THEN current_timestamp ELSE NULL END,
+                  ?, current_timestamp)
+        ON CONFLICT (corporate_number, field_name, source_key) DO NOTHING
+        """,
+        [corporate_number, field_name, source_key, state, input_fingerprint, state, evidence_id],
+    )
+    _execute_local(
+        con,
+        """
+        UPDATE enrichment.enrichment_state
+        SET state = ?, input_fingerprint = ?, last_evidence_id = ?,
+            last_error = NULL, next_attempt_at = NULL,
+            last_completed_at = CASE
+                WHEN ? IN ('found', 'verified') THEN current_timestamp
+                ELSE last_completed_at
+            END,
+            updated_at = current_timestamp
+        WHERE corporate_number = ? AND field_name = ? AND source_key = ?
+          AND state <> 'leased'
+          AND (
+              state = 'waiting_for_dependency'
+              OR input_fingerprint IS DISTINCT FROM ?
+              OR (? IN ('found', 'verified') AND state <> ?)
+          )
+        """,
+        [
+            state,
+            input_fingerprint,
+            evidence_id,
+            state,
+            corporate_number,
+            field_name,
+            source_key,
+            input_fingerprint,
+            state,
+            state,
+        ],
+    )
+
+
+def _advance_website_pipeline(
+    con: Any,
+    corporate_number: str,
+    *,
+    role: str,
+    status: str,
+    normalized_url: str,
+    evidence_id: str | None,
+    pipeline_source_key: str = "official_site",
+) -> None:
+    fingerprint = hashlib.sha256(normalized_url.encode("utf-8")).hexdigest()
+    if role == "official_candidate" and status in {"found", "needs_review", "verified"}:
+        _ensure_pipeline_task(
+            con,
+            corporate_number,
+            "website_discovery",
+            "found",
+            evidence_id,
+            input_fingerprint=fingerprint,
+            source_key=pipeline_source_key,
+        )
+        _ensure_pipeline_task(
+            con,
+            corporate_number,
+            "website_verification",
+            "pending",
+            evidence_id,
+            input_fingerprint=fingerprint,
+            source_key=pipeline_source_key,
+        )
+    if role == "official_homepage" and status == "verified":
+        _ensure_pipeline_task(
+            con,
+            corporate_number,
+            "website_verification",
+            "verified",
+            evidence_id,
+            input_fingerprint=fingerprint,
+            source_key=pipeline_source_key,
+        )
+        _ensure_pipeline_task(
+            con,
+            corporate_number,
+            "contact_extraction",
+            "pending",
+            evidence_id,
+            input_fingerprint=fingerprint,
+            source_key=pipeline_source_key,
+        )
+
+
 def import_enrichment_records(
     database_path: Path = DEFAULT_DB,
     records: Iterable[Mapping[str, Any]] = (),
     *,
     enrichment_path: Path = DEFAULT_ENRICHMENT_DB,
     batch_size: int = 1000,
+    _allow_verified_websites: bool = False,
 ) -> dict[str, int]:
-    """Import extractor output as latest facts while retaining evidence history."""
+    """Import extractor output as latest facts while retaining evidence history.
+
+    The generic/JSONL boundary cannot promote an official homepage or make a
+    contact sales-ready.  Website verification is reserved for the explicit
+    verifier and validated public-record bridge; contacts become ``allowed``
+    only through :func:`review_contact` so every promotion has an audit row.
+    """
 
     if batch_size < 1:
         raise EnrichmentError("batch_size は1以上で指定してください。")
@@ -1368,18 +1694,40 @@ def import_enrichment_records(
                     if not field_name:
                         raise EnrichmentError("stateレコードにはfield_nameが必要です。")
                     state = _state_for_record(record, default="needs_review")
-                    _upsert_state(
-                        con,
-                        corporate_number,
-                        field_name,
-                        source_key,
-                        state,
-                        evidence_id,
-                        record.get("error"),
-                        input_fingerprint=record.get("input_fingerprint"),
-                        policy_code=record.get("policy_code"),
-                        worker_run_id=record.get("worker_run_id"),
-                    )
+                    lease_owner = str(record.get("lease_owner") or "").strip()
+                    if lease_owner:
+                        lease_token = str(record.get("lease_token") or "").strip()
+                        if not lease_token:
+                            raise EnrichmentError(
+                                "worker完了stateにはclaimで返されたlease_tokenが必要です。"
+                            )
+                        _complete_leased_state(
+                            con,
+                            corporate_number,
+                            field_name,
+                            source_key,
+                            state,
+                            lease_owner,
+                            lease_token,
+                            evidence_id,
+                            record.get("error"),
+                            input_fingerprint=record.get("input_fingerprint"),
+                            policy_code=record.get("policy_code"),
+                            worker_run_id=record.get("worker_run_id"),
+                        )
+                    else:
+                        _upsert_state(
+                            con,
+                            corporate_number,
+                            field_name,
+                            source_key,
+                            state,
+                            evidence_id,
+                            record.get("error"),
+                            input_fingerprint=record.get("input_fingerprint"),
+                            policy_code=record.get("policy_code"),
+                            worker_run_id=record.get("worker_run_id"),
+                        )
                     counts["state"] = counts.get("state", 0) + 1
                     continue
                 evidence_id, source_url, observed_at = _insert_evidence(con, record, corporate_number)
@@ -1389,6 +1737,15 @@ def import_enrichment_records(
                     if role not in WEBSITE_ROLES:
                         raise EnrichmentError(f"未知のwebsite_roleです: {role}")
                     status = _state_for_record(record)
+                    if (
+                        role == "official_homepage"
+                        and status == "verified"
+                        and not _allow_verified_websites
+                    ):
+                        raise EnrichmentError(
+                            "generic importerからofficial_homepageをverifiedへ昇格できません。"
+                            " verify-websiteまたは検証済みpublic bridgeを使用してください。"
+                        )
                     _execute_local(
                         con,
                         """
@@ -1425,6 +1782,15 @@ def import_enrichment_records(
                         policy_code=record.get("policy_code"),
                         worker_run_id=record.get("worker_run_id"),
                     )
+                    _advance_website_pipeline(
+                        con,
+                        corporate_number,
+                        role=role,
+                        status=status,
+                        normalized_url=url,
+                        evidence_id=evidence_id,
+                        pipeline_source_key=str(record.get("pipeline_source_key") or "official_site"),
+                    )
                 elif kind == "contact":
                     contact_type = str(record.get("contact_type") or "").strip()
                     if contact_type not in CONTACT_TYPES:
@@ -1434,6 +1800,11 @@ def import_enrichment_records(
                     eligibility = str(record.get("sales_eligibility") or "review")
                     if eligibility not in SALES_ELIGIBILITY:
                         raise EnrichmentError(f"未知のsales_eligibilityです: {eligibility}")
+                    if eligibility != "review":
+                        raise EnrichmentError(
+                            "generic importerからcontactの営業利用可否を確定できません。"
+                            " review-contactで証拠と利用可否を確認してください。"
+                        )
                     _execute_local(
                         con,
                         """
@@ -1448,7 +1819,13 @@ def import_enrichment_records(
                             source_url = excluded.source_url, observed_at = excluded.observed_at,
                             status = excluded.status, confidence = excluded.confidence,
                             verification_status = excluded.verification_status,
-                            sales_eligibility = excluded.sales_eligibility, last_error = excluded.last_error
+                            sales_eligibility = CASE
+                                WHEN enrichment.company_contact_points.sales_eligibility
+                                     IN ('allowed', 'not_allowed')
+                                    THEN enrichment.company_contact_points.sales_eligibility
+                                ELSE excluded.sales_eligibility
+                            END,
+                            last_error = excluded.last_error
                         """,
                         [
                             _new_id(), corporate_number, contact_type, record.get("value"), normalized,
@@ -1654,16 +2031,31 @@ def claim_enrichment_tasks(
             """,
             [*params, batch_size],
         ).fetchall()
+        claimed_rows: list[tuple[Any, Any, Any, str]] = []
         for corporate_number, task_field, task_source in rows:
+            lease_token = _new_id()
             _execute_local(
                 con,
                 """
                 UPDATE enrichment.enrichment_state
                 SET state = 'leased', attempt_count = attempt_count + 1,
-                    lease_owner = ?, lease_until = ?, last_started_at = ?, updated_at = ?
+                    lease_owner = ?, lease_token = ?, lease_until = ?,
+                    last_started_at = ?, updated_at = ?
                 WHERE corporate_number = ? AND field_name = ? AND source_key = ?
                 """,
-                [worker_id, lease_until, now, now, corporate_number, task_field, task_source],
+                [
+                    worker_id,
+                    lease_token,
+                    lease_until,
+                    now,
+                    now,
+                    corporate_number,
+                    task_field,
+                    task_source,
+                ],
+            )
+            claimed_rows.append(
+                (corporate_number, task_field, task_source, lease_token)
             )
         con.execute("COMMIT")
         return [
@@ -1672,9 +2064,10 @@ def claim_enrichment_tasks(
                 "field_name": row[1],
                 "source_key": row[2],
                 "lease_owner": worker_id,
+                "lease_token": row[3],
                 "lease_until": lease_until.isoformat(),
             }
-            for row in rows
+            for row in claimed_rows
         ]
     except Exception:
         try:
@@ -1698,44 +2091,138 @@ def complete_enrichment_task(
     source_key: str,
     state: str,
     worker_id: str | None = None,
+    lease_token: str | None = None,
     evidence_id: str | None = None,
     error: str | None = None,
 ) -> None:
     corporate_number = _require_corporate_number(corporate_number)
     if state not in ENRICHMENT_STATES - {"pending", "leased"}:
         raise EnrichmentError(f"完了処理に使えない状態です: {state}")
+    worker_id = str(worker_id or "").strip()
+    lease_token = str(lease_token or "").strip()
+    if not worker_id or not lease_token:
+        raise EnrichmentError("完了にはworker_idとclaimで返されたlease_tokenが必要です。")
     con, writer_lock = _open_writer(Path(enrichment_path).resolve())
     attached = False
     try:
         _attach_canonical(con, Path(database_path).resolve())
         attached = True
         initialize_enrichment_schema(con, company_relation="canonical.core.companies")
-        where = "corporate_number = ? AND field_name = ? AND source_key = ?"
-        params: list[Any] = [corporate_number, field_name, source_key]
-        if worker_id:
-            where += " AND lease_owner = ?"
-            params.append(worker_id)
-        target_count = int(
-            _execute_local(
-                con,
-                f"SELECT count(*) FROM enrichment.enrichment_state WHERE {where}",
-                params,
-            ).fetchone()[0]
-        )
-        if target_count != 1:
-            raise EnrichmentError("対象タスクがありません、またはworker_idが一致しません。")
-        _execute_local(
+        _complete_leased_state(
             con,
-            f"""
-            UPDATE enrichment.enrichment_state
-            SET state = ?, lease_owner = NULL, lease_until = NULL,
-                last_completed_at = current_timestamp, last_error = ?,
-                last_evidence_id = ?, updated_at = current_timestamp
-            WHERE {where}
-            """,
-            [state, error, evidence_id, *params],
+            corporate_number,
+            field_name,
+            source_key,
+            state,
+            worker_id,
+            lease_token,
+            evidence_id,
+            error,
         )
         con.execute("CHECKPOINT")
+    finally:
+        if attached:
+            con.execute("DETACH canonical")
+        con.close()
+        writer_lock.release()
+
+
+def review_contact(
+    database_path: Path = DEFAULT_DB,
+    *,
+    enrichment_path: Path = DEFAULT_ENRICHMENT_DB,
+    corporate_number: str,
+    contact_type: str,
+    value: str,
+    decision: str,
+    reviewer: str,
+    reason: str,
+) -> dict[str, str]:
+    """Record an explicit review and change sales eligibility atomically."""
+
+    corporate_number = _require_corporate_number(corporate_number)
+    if contact_type not in CONTACT_TYPES:
+        raise EnrichmentError(f"未知のcontact_typeです: {contact_type}")
+    if decision not in {"allowed", "not_allowed"}:
+        raise EnrichmentError("decisionはallowedまたはnot_allowedです。")
+    reviewer = reviewer.strip()
+    reason = reason.strip()
+    if not reviewer or len(reviewer) > 128:
+        raise EnrichmentError("reviewerは1〜128文字で指定してください。")
+    if not reason or len(reason) > 2_000:
+        raise EnrichmentError("reasonは1〜2000文字で指定してください。")
+    normalized = normalize_contact(contact_type, value)
+    con, writer_lock = _open_writer(Path(enrichment_path).resolve())
+    attached = False
+    try:
+        _attach_canonical(con, Path(database_path).resolve())
+        attached = True
+        initialize_enrichment_schema(con, company_relation="canonical.core.companies")
+        con.execute("BEGIN TRANSACTION")
+        row = _execute_local(
+            con,
+            """
+            SELECT contact_id, sales_eligibility
+            FROM enrichment.company_contact_points
+            WHERE corporate_number = ? AND contact_type = ? AND value_normalized = ?
+              AND status IN ('found', 'verified')
+              AND source_evidence_id IS NOT NULL
+              AND nullif(trim(source_url), '') IS NOT NULL
+            """,
+            [corporate_number, contact_type, normalized],
+        ).fetchone()
+        if row is None:
+            raise EnrichmentError("証拠付きのreview対象contactがありません。")
+        contact_id, previous = str(row[0]), str(row[1])
+        review_id = _new_id()
+        _execute_local(
+            con,
+            """
+            INSERT INTO enrichment.contact_reviews(
+                review_id, contact_id, corporate_number, contact_type,
+                value_normalized, previous_sales_eligibility, decision,
+                reviewer, reason, reviewed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)
+            """,
+            [
+                review_id,
+                contact_id,
+                corporate_number,
+                contact_type,
+                normalized,
+                previous,
+                decision,
+                reviewer,
+                reason,
+            ],
+        )
+        _execute_local(
+            con,
+            """
+            UPDATE enrichment.company_contact_points
+            SET sales_eligibility = ?
+            WHERE contact_id = ?
+            """,
+            [decision, contact_id],
+        )
+        con.execute("COMMIT")
+        con.execute("CHECKPOINT")
+        return {
+            "review_id": review_id,
+            "contact_id": contact_id,
+            "corporate_number": corporate_number,
+            "contact_type": contact_type,
+            "value_normalized": normalized,
+            "previous_sales_eligibility": previous,
+            "decision": decision,
+            "reviewer": reviewer,
+        }
+    except Exception:
+        try:
+            con.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
     finally:
         if attached:
             con.execute("DETACH canonical")
@@ -1861,6 +2348,7 @@ __all__ = [
     "DEFAULT_ENRICHMENT_DB",
     "ENRICHMENT_SCHEMA_VERSION",
     "ENRICHMENT_STATES",
+    "ENRICHMENT_TASK_FIELDS",
     "EnrichmentError",
     "SALES_ELIGIBILITY",
     "claim_enrichment_tasks",
@@ -1873,6 +2361,7 @@ __all__ = [
     "initialize_database",
     "initialize_enrichment_schema",
     "normalize_contact",
+    "review_contact",
     "normalize_email",
     "normalize_phone",
     "normalize_suppression_value",

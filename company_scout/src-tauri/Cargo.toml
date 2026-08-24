@@ -1,6 +1,6 @@
 [package]
 name = "company-master"
-version = "0.10.0"
+version = "0.10.1"
 description = "Fast internal company search, research, and Salesforce export"
 authors = ["GL Workspace"]
 edition = "2021"

@@ -13,5 +13,7 @@ if (-not (Test-Path $Python)) {
 $env:QUERIA_NO_TELEMETRY = "1"
 & $Python -m queria_master refresh --scope $Scope
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& $Python -m queria_master build-search-index
+& $Python -m queria_master init-enrichment
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $Python -m queria_master publish-runtime
 exit $LASTEXITCODE

@@ -20,12 +20,12 @@ function Invoke-Python {
 }
 
 if (-not (Test-Path ".venv\Scripts\python.exe")) {
-    Write-Host "[1/4] Creating the Python virtual environment"
+    Write-Host "[1/5] Creating the Python virtual environment"
     Invoke-Python -Arguments @("-m", "venv", ".venv")
 }
 
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
-Write-Host "[2/4] Installing or updating Queria CLI and DuckDB"
+Write-Host "[2/5] Installing or updating Queria CLI and DuckDB"
 & $Python -m pip install --upgrade pip
 if ($LASTEXITCODE -ne 0) { throw "pip update failed." }
 & $Python -m pip install --upgrade -r requirements.txt
@@ -33,17 +33,28 @@ if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed." }
 
 $env:QUERIA_NO_TELEMETRY = "1"
 if ((Test-Path "data\queria_master.duckdb") -and (Test-Path "cache\all-public-latest")) {
-    Write-Host "[3/4] Using the bundled full dataset (no re-download)"
+    Write-Host "[3/5] Using the bundled full dataset (no re-download)"
 } else {
-    Write-Host "[3/4] Downloading public Queria data and building DuckDB"
+    Write-Host "[3/5] Downloading public Queria data and building DuckDB"
     & $Python -m queria_master refresh --scope $Scope
     if ($LASTEXITCODE -ne 0) { throw "Data build failed." }
 }
 
-Write-Host "[4/4] Validating the local database"
+& $Python -m queria_master app-health *> $null
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "[4/5] Using the generation-matched runtime and search index"
+} else {
+    Write-Host "[4/5] Building enrichment, runtime, and search index"
+    & $Python -m queria_master init-enrichment
+    if ($LASTEXITCODE -ne 0) { throw "Enrichment initialization failed." }
+    & $Python -m queria_master publish-runtime
+    if ($LASTEXITCODE -ne 0) { throw "Runtime/index publication failed." }
+}
+
+Write-Host "[5/5] Validating the local database"
 & $Python -m queria_master doctor
 if ($LASTEXITCODE -ne 0) { throw "Validation failed." }
 
 Write-Host ""
-Write-Host "Ready: data\queria_master.duckdb" -ForegroundColor Green
+Write-Host "Ready: data\queria_runtime.duckdb + data\search.sqlite" -ForegroundColor Green
 Write-Host ".\.venv\Scripts\python.exe -m queria_master search --keyword AI --limit 100"

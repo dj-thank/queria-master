@@ -9,4 +9,5 @@ if [[ ! -x .venv/bin/python ]]; then
 fi
 export QUERIA_NO_TELEMETRY=1
 .venv/bin/python -m queria_master refresh --scope "$SCOPE"
-.venv/bin/python -m queria_master build-search-index
+.venv/bin/python -m queria_master init-enrichment
+.venv/bin/python -m queria_master publish-runtime

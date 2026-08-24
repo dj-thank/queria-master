@@ -2,23 +2,25 @@
 
 ## 結論
 
-GitHubの全通常ブランチ12本、タグ3本、PR参照を取得した。現在の正本は`main@b16fb642f95bd36cd0efde2ee2b5167ea79d034b`。`feat/jsic39-contact-collection`と`feat/jsic39-contact-campaign`はmainと最終ツリーが完全一致し、JSIC39の公式HP/電話収集はmain統合済みである。
+GitHubの全通常ブランチ14本、タグ、全PR参照を再取得した。統合基準は`main@14b9b1b6334d41e6f3f2781e72f905ab408d9236`で、PR #22〜#25のG版v0.10.0、検索ワークベンチ、portable Windows artifactに加え、PR #27の再開可能・fail-closedなG37〜41電話候補収集を含む。PR #26はこのmainより1 commit古いため、そのままmergeせず、本v0.10.1統合で内容を再base相当で取り込み、PR #27の暗号化・再開・PR検証を優先した。
 
-未統合の重要系統は2つある。
+監査時点でmainにブランチ単位では未統合の重要系統は2つあった。
 
 - PR #5 `feat/public-enrichment-desktop`: 汎用公開情報補完をデスクトップ操作へ接続。open。
-- PR #21 `codex/ui-search-workbench-20260821`: 検索UI、100件ページング、FTS5経路、セキュリティ強化。draft/open。
+- PR #9 `data/jsic39-release-20260821-batch0000`: 分割ZIP、manifest、SHA-256を含む公開データpackaging。closed/unmerged。
 
-どちらもmainの後続ハードニングとローカルG拡張から分岐しているため、ブランチ全体をそのままマージしない。機能単位で取り込み、Python/Rust/Reactの現行契約で再試験する。
+旧PR #21はclosed/unmergedだが、その検索ワークベンチはG版へ合わせたPR #23としてmainに統合済みである。PR #5/#9はmainの後続ハードニングとG拡張より前から分岐しているため、ブランチ全体をそのままマージしない。固定command境界、補完UI、再現可能packagingだけを現行G版へ機能単位で移植し、Python/Rust/Reactの現行契約で再試験した。したがってPR #5と#26はv0.10.1統合後にsupersededとして閉じられる。
 
 ## 参照一覧
 
 | ブランチ | 先端 | 判定 |
 | --- | --- | --- |
-| `main` | `b16fb642` | 正本。PR #8まで統合済み |
-| `feat/jsic39-contact-campaign` | `b16fb642` | mainと同一 |
-| `feat/jsic39-contact-collection` | `54883164` | 履歴は21 commitだが最終ツリーはmainと同一。PR #8 merged |
-| `codex/ui-search-workbench-20260821` | `113e4527` | PR #21 draft/open。main比17ファイル、+5,206/-842 |
+| `main` | `14b9b1b6` | 正本。PR #22〜#25と#27まで統合済み |
+| `codex/integrate-latest-branches-zips-20260824` | `6516f75a` | PR #26。内容をv0.10.1へ再統合し、旧branchはsuperseded |
+| `codex/resumable-g-contact-pilot-20260824` | `4f849c81` | PR #27 merged。暗号化・再開・fail-closed収集の正本 |
+| `feat/jsic39-contact-campaign` | `b16fb642` | 旧main時点。現在のmainより4 commit前 |
+| `feat/jsic39-contact-collection` | `54883164` | PR #8 merged済みの履歴branch。現在のmainへ再マージ不要 |
+| `codex/ui-search-workbench-20260821` | `113e4527` | PR #21 closed/unmerged。PR #23がG版としてsupersedeしてmainへ統合 |
 | `feat/public-enrichment-desktop` | `88611be7` | PR #5 open。固定コマンドのPython補完ブリッジ |
 | `data/jsic39-release-20260821-batch0000` | `593d635f` | PR #9 closed/unmerged。分割ZIP・証拠・SHA-256公開処理は再利用候補 |
 | `docs/readme-current-20260821` | `944395aa` | PR #7 merged済みの作業履歴。mainへ再マージ不要 |
@@ -49,14 +51,31 @@ GitHubの全通常ブランチ12本、タグ3本、PR参照を取得した。現
 | #7 | merged | `docs/readme-current-20260821` | README更新 |
 | #8 | merged | `feat/jsic39-contact-collection` | JSIC39 HP/電話収集 |
 | #9 | closed/unmerged | `data/jsic39-release-20260821-batch0000` | 収集データ公開 |
-| #21 | draft/open | `codex/ui-search-workbench-20260821` | 検索ワークベンチ |
+| #21 | draft/closed/unmerged | `codex/ui-search-workbench-20260821` | 検索ワークベンチ。#23がsupersede |
+| #22 | merged | `codex/g-information-db-v0.10.0` | G情報DB v0.10.0。merge `ab55bb09` |
+| #23 | merged | `codex/integrate-search-workbench-v0.10.0` | G版へ検索workbench統合。merge `dacc66ff` |
+| #24 | merged | `codex/fix-portable-artifact-path` | portable Windows artifact修正。merge `aa39b7da` |
+| #25 | merged | `codex/update-v010-release-notes` | v0.10.0 release note。merge `78b55497` |
+| #26 | open→superseded予定 | `codex/integrate-latest-branches-zips-20260824` | 旧branch群の有効部分を統合。本v0.10.1 PRへ再統合 |
+| #27 | merged | `codex/resumable-g-contact-pilot-20260824` | G37〜41電話候補収集の再開・暗号化・fail-closed化。merge `14b9b1b6` |
+
+## 関連issue
+
+| issue | state | この統合での扱い |
+|---:|---|---|
+| #10 Public enrichment→canonical runtime/index | open | staging bridge、evidence DB、review、generation一致publish経路を実装。Windows実配布smoke後にclose判断 |
+| #15 Rust/React/Python PR CI | open | Python/package、frontend、Rust fmt/testのPR CIを追加。mainのbranch protectionは未設定 |
+| #18 DuckDB外部read遮断 | open | 公開SQLのwrite keyword契約は維持。DuckDB全external read surfaceの網羅は別途必要 |
+| #19 website network/robots security | open | DNS全回答検査、verified IP pinning、redirect再検証、HTTPS downgrade拒否、body/content-type上限を実装。live network/robots検証は残る |
 
 ## G情報DBへの取込方針
 
-1. `main`をソース正本に維持する。
-2. PR #5からは「公開補完の進捗・入出力UI」を、現行スキーマに合わせて取り込む。
-3. PR #21からは100件ページング、FTS5経路、検索フォールバック表示、電話収集のSSRF強化を優先する。
-4. PR #9の分割パッケージ・マニフェスト・SHA-256を、G全体の収集バッチ配布に一般化する。
-5. 未統合ブランチをそのまま取り込まず、G版の法人番号回復・出典・重複契約を保持する。
+1. `main@14b9b1b6`を統合基準にし、G版v0.10.0、#23のworkbench、#27の電話収集安全境界を保持する。
+2. PR #5からは固定process境界、公開補完の進捗・入出力UIを、現行canonical→enrichment→runtime/index経路に接続する。
+3. PR #21の独自安全性変更は、#23/mainと重複を確認したうえでDNS pinning、redirect再検証、bounded responseなど不足分だけを採用する。
+4. PR #9からは再現可能なfile list、manifest、SHA-256、archive path検証を一般release packagingへ移植する。公開済みdata artifact自体をrepositoryへ再取込しない。
+5. 未統合branchをそのまま取り込まず、G/FUMAの法人番号回復・出典・重複契約を保持する。
+6. 履歴Hojinjoho ZIP由来機能はcanonicalへ直結せず、別のopt-in staging importerとしてのみ移植する。
+7. v0.10.1では検証済みDB世代を維持し、暗号化された未審査電話候補をcanonicalへ混ぜない。データ更新は同一世代照合と人手レビュー後に別releaseで行う。
 
 GitHub: [dj-thank/queria-master](https://github.com/dj-thank/queria-master)

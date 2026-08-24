@@ -6,7 +6,7 @@ on:
       release_tag:
         description: Release containing phone_targets_g37_41.csv
         required: false
-        default: "v0.10.0"
+        default: "v0.10.1"
       start_offset:
         description: Start position within prioritized pending official sites
         required: false
@@ -34,7 +34,7 @@ concurrency:
 
 env:
   PYTHONUNBUFFERED: "1"
-  RELEASE_TAG: ${{ github.event.inputs.release_tag || 'v0.10.0' }}
+  RELEASE_TAG: ${{ github.event.inputs.release_tag || 'v0.10.1' }}
   START_OFFSET: ${{ github.event.inputs.start_offset || '0' }}
   BATCH_SIZE: ${{ github.event.inputs.batch_size || '125' }}
   MAX_PAGES: ${{ github.event.inputs.max_pages || '4' }}
