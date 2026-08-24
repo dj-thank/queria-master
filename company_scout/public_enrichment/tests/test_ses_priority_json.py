@@ -326,3 +326,60 @@ def test_export_deduplicates_and_bounds_many_same_host_contact_forms(tmp_path: P
     record = next(json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines())
     assert len(record["official_site"]["evidence"]) <= 50
     assert len(record["contact_evidence"]) <= 20
+
+
+def test_export_rehashes_excerpt_after_normalizing_legacy_whitespace(tmp_path: Path) -> None:
+    targets = tmp_path / "targets.csv"
+    manifest = tmp_path / "manifest.csv"
+    progress = tmp_path / "progress.jsonl"
+    write_targets(targets)
+    write_manifest(manifest, "1000000000001", "https://alpha.example/")
+    raw_excerpt = "SES\u00a0"
+    progress.write_text(json.dumps({
+        "schema_version": 2,
+        "corporate_number": "1000000000001",
+        "official_site_url": "https://alpha.example/",
+        "scope_label": "G37-G41",
+        "dataset_generation": "g-test",
+        "runtime_binding_status": "matched",
+        "target_binding_sha256": business_profile.target_binding_sha256(
+            corporate_number="1000000000001",
+            official_site_url="https://alpha.example/",
+            scope_label="G37-G41",
+            dataset_generation="g-test",
+            runtime_binding_status="matched",
+        ),
+        "state": "processed_no_phone",
+        "pages_fetched": 1,
+        "candidates": [],
+        "business_profile": {
+            "schema_version": 1,
+            "facts": [{
+                "signal": "ses",
+                "status": "observed_text",
+                "evidence_url": "https://alpha.example/about",
+                "excerpt": raw_excerpt,
+                "excerpt_sha256": hashlib.sha256(raw_excerpt.encode("utf-8")).hexdigest(),
+                "observed_at": "2026-08-25T00:00:00+00:00",
+            }],
+            "parent_company_candidates": [],
+            "unknowns": [],
+        },
+        "completed_at": "2026-08-25T00:00:00+00:00",
+    }) + "\n", encoding="utf-8")
+    jsonl = tmp_path / "out.jsonl"
+
+    priority.export_priority(
+        targets=targets,
+        manifest_patterns=[str(manifest)],
+        progress_patterns=[str(progress)],
+        schema=SCHEMA,
+        jsonl_output=jsonl,
+        csv_output=tmp_path / "out.csv",
+        summary_output=tmp_path / "out-summary.json",
+    )
+
+    record = next(json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines())
+    evidence = record["official_site"]["evidence"][0]
+    assert evidence["excerpt"] == "SES"
+    assert evidence["excerpt_sha256"] == hashlib.sha256(b"SES").hexdigest()
