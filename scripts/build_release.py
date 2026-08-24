@@ -7,9 +7,9 @@ import zipfile
 from pathlib import Path
 
 try:
-    from .verify_package import ROOT, package_files as release_files, sha256
+    from .verify_package import ROOT, package_files as release_files, release_bytes, sha256
 except ImportError:  # Direct script execution.
-    from verify_package import ROOT, package_files as release_files, sha256
+    from verify_package import ROOT, package_files as release_files, release_bytes, sha256
 
 
 def sync_assets() -> None:
@@ -47,8 +47,12 @@ def build_zip(output: Path) -> tuple[int, str]:
             info = zipfile.ZipInfo.from_file(path, arcname=relative.as_posix())
             if path.suffix == ".sh":
                 info.external_attr = (stat.S_IFREG | 0o755) << 16
-            with path.open("rb") as handle:
-                archive.writestr(info, handle.read(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+            archive.writestr(
+                info,
+                release_bytes(path),
+                compress_type=zipfile.ZIP_DEFLATED,
+                compresslevel=9,
+            )
     return len(files_with_manifest), sha256(output)
 
 

@@ -101,12 +101,30 @@ def package_files() -> list[Path]:
     return [path for path in sorted(candidates) if _is_release_file(path)]
 
 
+def release_bytes(path: Path) -> bytes:
+    """Return the canonical bytes that GitHub source archives will contain.
+
+    Windows checkouts commonly materialize tracked text as CRLF while Git and
+    GitHub archives store the indexed LF bytes.  Reading the index when it is
+    available makes the manifest identical on Windows and Linux.  Exported
+    source archives have no ``.git`` marker, so their actual bytes remain the
+    trust boundary.
+    """
+    if (ROOT / ".git").exists():
+        relative = path.relative_to(ROOT).as_posix()
+        result = subprocess.run(
+            ["git", "show", f":{relative}"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            return result.stdout
+    return path.read_bytes()
+
+
 def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while block := handle.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
+    return hashlib.sha256(release_bytes(path)).hexdigest()
 
 
 def _token_scan_text(path: Path, data: bytes) -> str:
@@ -155,7 +173,7 @@ def main() -> int:
     digest = hashlib.sha256()
     for path in files:
         relative = path.relative_to(ROOT).as_posix()
-        data = path.read_bytes()
+        data = release_bytes(path)
         digest.update(relative.encode("utf-8") + b"\0" + data)
         if path.suffix.lower() not in {".zip", ".duckdb", ".parquet", ".pyc"}:
             text = _token_scan_text(path, data)
