@@ -10,6 +10,17 @@ pub struct Db {
     runtime_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PhoneCandidateRecord {
+    pub phone: String,
+    pub phone_type: String,
+    pub source_url: String,
+    pub evidence_text: String,
+    pub confidence: f64,
+    pub observed_at: String,
+    pub status: String,
+}
+
 impl Db {
     pub fn new(path: PathBuf) -> Self {
         Self {
@@ -51,6 +62,9 @@ impl Db {
                 r#"
                 CREATE TABLE IF NOT EXISTS companies (
                   corporate_number VARCHAR PRIMARY KEY,
+                  entity_key VARCHAR,
+                  fuma_id VARCHAR,
+                  source_kind VARCHAR,
                   name VARCHAR NOT NULL,
                   prefecture VARCHAR,
                   city VARCHAR,
@@ -59,6 +73,12 @@ impl Db {
                   industry_code VARCHAR,
                   industry_name VARCHAR,
                   industry_source VARCHAR,
+                  industry_middle_code VARCHAR,
+                  industry_middle_name VARCHAR,
+                  industry_small_code VARCHAR,
+                  industry_small_name VARCHAR,
+                  industry_detail_code VARCHAR,
+                  industry_detail_name VARCHAR,
                   inferred_industry_code VARCHAR,
                   inferred_industry_name VARCHAR,
                   inferred_industry_confidence DOUBLE,
@@ -80,7 +100,13 @@ impl Db {
                   latest_net_income DOUBLE,
                   latest_total_assets DOUBLE,
                   latest_net_assets DOUBLE,
-                  source_updated_at VARCHAR
+                  source_updated_at VARCHAR,
+                  phone_type VARCHAR,
+                  phone_source_url VARCHAR,
+                  phone_confidence DOUBLE,
+                  phone_evidence_text VARCHAR,
+                  phone_observed_at VARCHAR,
+                  phone_status VARCHAR
                 );
                 "#,
             )?;
@@ -132,8 +158,35 @@ impl Db {
               phone VARCHAR,
               source_url VARCHAR NOT NULL,
               evidence_text VARCHAR,
+              phone_type VARCHAR,
+              phone_confidence DOUBLE,
+              phone_observed_at VARCHAR,
+              phone_status VARCHAR,
               collected_at TIMESTAMP DEFAULT current_timestamp
             );
+            CREATE TABLE IF NOT EXISTS company_phone_candidates (
+              corporate_number VARCHAR NOT NULL,
+              phone VARCHAR NOT NULL,
+              phone_type VARCHAR,
+              source_url VARCHAR NOT NULL,
+              evidence_text VARCHAR,
+              phone_confidence DOUBLE,
+              phone_observed_at VARCHAR,
+              phone_status VARCHAR,
+              collected_at TIMESTAMP DEFAULT current_timestamp,
+              PRIMARY KEY(corporate_number, phone, source_url)
+            );
+            CREATE TABLE IF NOT EXISTS company_phone_collection_state (
+              entity_key VARCHAR PRIMARY KEY,
+              website VARCHAR,
+              state VARCHAR NOT NULL,
+              last_completed_at VARCHAR,
+              last_error VARCHAR
+            );
+            ALTER TABLE company_contact_overrides ADD COLUMN IF NOT EXISTS phone_type VARCHAR;
+            ALTER TABLE company_contact_overrides ADD COLUMN IF NOT EXISTS phone_confidence DOUBLE;
+            ALTER TABLE company_contact_overrides ADD COLUMN IF NOT EXISTS phone_observed_at VARCHAR;
+            ALTER TABLE company_contact_overrides ADD COLUMN IF NOT EXISTS phone_status VARCHAR;
             "#,
         )?;
 
@@ -175,16 +228,35 @@ impl Db {
 
     pub fn status(&self, duckdb_version: Option<String>) -> Result<DataStatus> {
         let conn = self.connect()?;
+        let g_runtime = self.runtime_path.is_some() && is_g_fuma_runtime(&conn);
         let company_count: i64 = if self.runtime_path.is_some() {
-            conn.query_row("SELECT count(*) FROM queria_runtime.core.companies", [], |r| r.get(0))?
+            let table = if g_runtime { "queria_runtime.core.g_companies" } else { "queria_runtime.core.companies" };
+            conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?
         } else {
             conn.query_row("SELECT count(*) FROM companies", [], |r| r.get(0))?
         };
-        let taxonomy_count: i64 = conn.query_row("SELECT count(*) FROM industry_taxonomy", [], |r| r.get(0))?;
+        let taxonomy_count: i64 = if g_runtime {
+            conn.query_row("SELECT count(*) FROM queria_runtime.meta.industry_taxonomy", [], |r| r.get(0))?
+        } else {
+            conn.query_row("SELECT count(*) FROM industry_taxonomy", [], |r| r.get(0))?
+        };
         // Do not scan the aggregate search view just to paint the sidebar.
         // The source tables provide the same coverage figures much faster and
         // avoid delaying bootstrap on a 5.8M-row snapshot.
-        let coverage: (i64, i64, i64, i64, i64, i64) = if self.runtime_path.is_some() {
+        let coverage: (i64, i64, i64, i64, i64, i64) = if g_runtime {
+            conn.query_row(
+                "SELECT
+                   count(*) FILTER (WHERE nullif(trim(industry_code), '') IS NOT NULL),
+                   count(*) FILTER (WHERE employees IS NOT NULL),
+                   count(*) FILTER (WHERE capital IS NOT NULL),
+                   count(*) FILTER (WHERE nullif(trim(website), '') IS NOT NULL),
+                   count(*) FILTER (WHERE nullif(trim(phone), '') IS NOT NULL),
+                   count(*) FILTER (WHERE nullif(trim(address), '') IS NOT NULL)
+                 FROM queria_runtime.core.g_companies",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )?
+        } else if self.runtime_path.is_some() {
             conn.query_row(
                 "SELECT
                    (SELECT count(DISTINCT corporate_number) FROM queria_runtime.core.company_industries),
@@ -249,10 +321,13 @@ impl Db {
 
         let query_sql = format!(
             r#"SELECT
-              corporate_number,name,prefecture,city,address,kind,
+              corporate_number,entity_key,fuma_id,source_kind,name,prefecture,city,address,kind,
               industry_code,industry_name,industry_source,
+              industry_middle_code,industry_middle_name,industry_small_code,industry_small_name,
+              industry_detail_code,industry_detail_name,
               inferred_industry_code,inferred_industry_name,inferred_industry_confidence,
-              employees,capital,established_year,website,phone,representative,business_summary,source_updated_at
+              employees,capital,established_year,website,phone,representative,business_summary,source_updated_at,
+              phone_type,phone_source_url,phone_confidence,phone_evidence_text,phone_observed_at,phone_status
             FROM companies c
             WHERE {where_sql}
             ORDER BY name, corporate_number
@@ -312,10 +387,11 @@ impl Db {
         let safe_path = sql_quote(&path.to_string_lossy());
         let sql = format!(
             r#"COPY (
-              SELECT corporate_number,name,prefecture,city,address,kind,industry_code,industry_name,
-                     industry_source,inferred_industry_code,inferred_industry_name,inferred_industry_confidence,
-                     employees,capital,established_year,website,phone,representative,business_summary,
-                     source_updated_at
+              SELECT corporate_number,entity_key,fuma_id,source_kind,name,prefecture,city,address,kind,industry_code,industry_name,
+                     industry_source,industry_middle_code,industry_middle_name,industry_small_code,industry_small_name,
+                     industry_detail_code,industry_detail_name,inferred_industry_code,inferred_industry_name,inferred_industry_confidence,
+                     employees,capital,established_year,website,phone,representative,business_summary,source_updated_at,
+                     phone_type,phone_source_url,phone_confidence,phone_evidence_text,phone_observed_at,phone_status
               FROM companies c WHERE {where_sql}
               ORDER BY name, corporate_number
               LIMIT {limit}
@@ -338,10 +414,13 @@ impl Db {
         let limit = plan.limit;
         let query_sql = format!(
             r#"SELECT
-              corporate_number,name,prefecture,city,address,kind,
+              corporate_number,entity_key,fuma_id,source_kind,name,prefecture,city,address,kind,
               industry_code,industry_name,industry_source,
+              industry_middle_code,industry_middle_name,industry_small_code,industry_small_name,
+              industry_detail_code,industry_detail_name,
               inferred_industry_code,inferred_industry_name,inferred_industry_confidence,
-              employees,capital,established_year,website,phone,representative,business_summary,source_updated_at
+              employees,capital,established_year,website,phone,representative,business_summary,source_updated_at,
+              phone_type,phone_source_url,phone_confidence,phone_evidence_text,phone_observed_at,phone_status
             FROM companies c
             WHERE {where_sql}
             ORDER BY name, corporate_number
@@ -358,9 +437,10 @@ impl Db {
         // The Excel row limit below still prevents an unbounded allocation.
         let worksheet = workbook.add_worksheet();
         let headers = [
-            "法人番号", "会社名", "都道府県", "市区町村", "住所", "法人種別", "業種コード", "業種名",
-            "業種ソース", "AI推定業種コード", "AI推定業種名", "AI推定信頼度", "従業員数", "資本金",
-            "設立年", "Webサイト", "電話", "代表者", "事業概要", "更新日時",
+            "法人番号", "Entity Key", "FUMA_ID", "データソース", "会社名", "都道府県", "市区町村", "住所", "法人種別", "業種コード", "業種名",
+            "業種ソース", "中分類コード", "中分類名", "小分類コード", "小分類名", "細分類コード", "細分類名",
+            "AI推定業種コード", "AI推定業種名", "AI推定信頼度", "従業員数", "資本金", "設立年", "Webサイト", "電話", "代表者", "事業概要", "更新日時",
+            "電話用途", "電話根拠URL", "電話信頼度", "電話証拠", "電話取得日時", "電話状態",
         ];
         for (column, header) in headers.iter().enumerate() {
             worksheet.write_string(0, column as u16, *header)?;
@@ -370,6 +450,9 @@ impl Db {
             let company = company_from_row(row)?;
             let values = [
                 company.corporate_number,
+                company.entity_key.unwrap_or_default(),
+                company.fuma_id.unwrap_or_default(),
+                company.source_kind.unwrap_or_default(),
                 company.name,
                 company.prefecture.unwrap_or_default(),
                 company.city.unwrap_or_default(),
@@ -378,6 +461,12 @@ impl Db {
                 company.industry_code.unwrap_or_default(),
                 company.industry_name.unwrap_or_default(),
                 company.industry_source.unwrap_or_default(),
+                company.industry_middle_code.unwrap_or_default(),
+                company.industry_middle_name.unwrap_or_default(),
+                company.industry_small_code.unwrap_or_default(),
+                company.industry_small_name.unwrap_or_default(),
+                company.industry_detail_code.unwrap_or_default(),
+                company.industry_detail_name.unwrap_or_default(),
                 company.inferred_industry_code.unwrap_or_default(),
                 company.inferred_industry_name.unwrap_or_default(),
                 company.inferred_industry_confidence.map(|v| v.to_string()).unwrap_or_default(),
@@ -389,6 +478,12 @@ impl Db {
                 company.representative.unwrap_or_default(),
                 company.business_summary.unwrap_or_default(),
                 company.source_updated_at.unwrap_or_default(),
+                company.phone_type.unwrap_or_default(),
+                company.phone_source_url.unwrap_or_default(),
+                company.phone_confidence.map(|v| v.to_string()).unwrap_or_default(),
+                company.phone_evidence_text.unwrap_or_default(),
+                company.phone_observed_at.unwrap_or_default(),
+                company.phone_status.unwrap_or_default(),
             ];
             for (column, value) in values.iter().enumerate() {
                 worksheet.write_string(output_row, column as u16, value.as_str())?;
@@ -463,10 +558,12 @@ impl Db {
     pub fn list_companies(&self, list_name: &str) -> Result<Vec<Company>> {
         let conn = self.connect()?;
         let mut stmt = conn.prepare(
-            r#"SELECT c.corporate_number,c.name,c.prefecture,c.city,c.address,c.kind,
-               c.industry_code,c.industry_name,c.industry_source,c.inferred_industry_code,
-               c.inferred_industry_name,c.inferred_industry_confidence,c.employees,c.capital,
-               c.established_year,c.website,c.phone,c.representative,c.business_summary,c.source_updated_at
+            r#"SELECT c.corporate_number,c.entity_key,c.fuma_id,c.source_kind,c.name,c.prefecture,c.city,c.address,c.kind,
+               c.industry_code,c.industry_name,c.industry_source,c.industry_middle_code,c.industry_middle_name,
+               c.industry_small_code,c.industry_small_name,c.industry_detail_code,c.industry_detail_name,
+               c.inferred_industry_code,c.inferred_industry_name,c.inferred_industry_confidence,c.employees,c.capital,
+               c.established_year,c.website,c.phone,c.representative,c.business_summary,c.source_updated_at,
+               c.phone_type,c.phone_source_url,c.phone_confidence,c.phone_evidence_text,c.phone_observed_at,c.phone_status
                FROM companies c
                JOIN company_list_items i ON c.corporate_number=i.corporate_number
                JOIN company_lists l ON l.id=i.list_id
@@ -602,7 +699,44 @@ fn attach_runtime(conn: &Connection, runtime_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn is_g_fuma_runtime(conn: &Connection) -> bool {
+    conn.query_row("SELECT count(*) FROM queria_runtime.core.g_companies", [], |r| r.get::<_, i64>(0)).is_ok()
+}
+
 fn ensure_runtime_view(conn: &Connection) -> Result<()> {
+    if is_g_fuma_runtime(conn) {
+        conn.execute_batch(
+            r#"
+            CREATE OR REPLACE VIEW companies AS
+            SELECT
+              coalesce(nullif(base.corporate_number, ''), base.entity_key) AS corporate_number,
+              base.entity_key, base.fuma_id, base.source_kind,
+              base.name, base.prefecture, base.city, base.address, base.kind,
+              base.industry_code, base.industry_name, base.industry_source,
+              base.industry_middle_code, base.industry_middle_name,
+              base.industry_small_code, base.industry_small_name,
+              base.industry_detail_code, base.industry_detail_name,
+              NULL::VARCHAR AS inferred_industry_code,
+              NULL::VARCHAR AS inferred_industry_name,
+              NULL::DOUBLE AS inferred_industry_confidence,
+              base.employees, base.capital, base.established_year, base.website,
+              coalesce(local_contacts.phone, base.phone) AS phone,
+              base.representative, base.business_summary, base.business_summary AS business_items, base.source_updated_at,
+              coalesce(local_contacts.phone_type, base.phone_type) AS phone_type,
+              coalesce(local_contacts.source_url, base.phone_source_url) AS phone_source_url,
+              coalesce(local_contacts.phone_confidence, base.phone_confidence) AS phone_confidence,
+              coalesce(local_contacts.evidence_text, base.phone_evidence_text) AS phone_evidence_text,
+              coalesce(local_contacts.phone_observed_at, base.phone_observed_at) AS phone_observed_at,
+              coalesce(local_contacts.phone_status, local_state.state, base.phone_status) AS phone_status
+            FROM queria_runtime.core.g_companies AS base
+            LEFT JOIN company_contact_overrides AS local_contacts
+              ON local_contacts.corporate_number = base.entity_key
+            LEFT JOIN company_phone_collection_state AS local_state
+              ON local_state.entity_key = base.entity_key;
+            "#,
+        )?;
+        return Ok(());
+    }
     conn.execute_batch(
         r#"
         CREATE OR REPLACE VIEW companies AS
@@ -622,6 +756,9 @@ fn ensure_runtime_view(conn: &Connection) -> Result<()> {
         )
         SELECT
           base.corporate_number,
+          base.corporate_number AS entity_key,
+          NULL::VARCHAR AS fuma_id,
+          'national' AS source_kind,
           base.company_name AS name,
           coalesce(nullif(base.prefecture_name, ''), contacts.resolved_prefecture_name) AS prefecture,
           coalesce(nullif(base.city_name, ''), contacts.resolved_city_name) AS city,
@@ -640,6 +777,12 @@ fn ensure_runtime_view(conn: &Connection) -> Result<()> {
             nullif(industry_agg.small_names, '')
           ), '') AS industry_name,
           CASE WHEN industry_agg.codes IS NOT NULL THEN 'queria_runtime/jsic' ELSE 'queria_runtime' END AS industry_source,
+          NULL::VARCHAR AS industry_middle_code,
+          NULL::VARCHAR AS industry_middle_name,
+          NULL::VARCHAR AS industry_small_code,
+          NULL::VARCHAR AS industry_small_name,
+          NULL::VARCHAR AS industry_detail_code,
+          NULL::VARCHAR AS industry_detail_name,
           NULL::VARCHAR AS inferred_industry_code,
           NULL::VARCHAR AS inferred_industry_name,
           NULL::DOUBLE AS inferred_industry_confidence,
@@ -650,49 +793,72 @@ fn ensure_runtime_view(conn: &Connection) -> Result<()> {
           coalesce(local_contacts.phone, contacts.phone) AS phone,
           coalesce(nullif(base.representative_name, ''), contacts.representative_name) AS representative,
           coalesce(nullif(base.business_summary, ''), contacts.business_summary) AS business_summary,
-          coalesce(nullif(base.business_items_raw, ''), contacts.business_items_raw) AS business_items,
-          base.subsidy_count,
-          base.subsidy_total_amount,
-          base.procurement_count,
-          base.procurement_total_award,
-          try_cast(base.latest_fiscal_year AS INTEGER) AS latest_fiscal_year,
-          try_cast(base.latest_net_sales AS DOUBLE) AS latest_net_sales,
-          try_cast(base.latest_ordinary_income AS DOUBLE) AS latest_ordinary_income,
-          try_cast(base.latest_net_income AS DOUBLE) AS latest_net_income,
-          try_cast(base.latest_total_assets AS DOUBLE) AS latest_total_assets,
-          try_cast(base.latest_net_assets AS DOUBLE) AS latest_net_assets,
-          CAST(base.extracted_at AS VARCHAR) AS source_updated_at
+          base.business_items_raw AS business_items,
+          CAST(base.extracted_at AS VARCHAR) AS source_updated_at,
+          local_contacts.phone_type AS phone_type,
+          local_contacts.source_url AS phone_source_url,
+          local_contacts.phone_confidence AS phone_confidence,
+          local_contacts.evidence_text AS phone_evidence_text,
+          local_contacts.phone_observed_at AS phone_observed_at,
+          coalesce(local_contacts.phone_status, local_state.state) AS phone_status
         FROM queria_runtime.core.companies AS base
         LEFT JOIN industry_agg
           ON industry_agg.corporate_number = base.corporate_number
         LEFT JOIN queria_runtime.search.company_documents AS contacts
           ON contacts.corporate_number = base.corporate_number
         LEFT JOIN company_contact_overrides AS local_contacts
-          ON local_contacts.corporate_number = base.corporate_number;
+          ON local_contacts.corporate_number = base.corporate_number
+        LEFT JOIN company_phone_collection_state AS local_state
+          ON local_state.entity_key = base.corporate_number;
         "#,
     )?;
     Ok(())
 }
 
 impl Db {
-    pub fn save_phone_override(&self, corporate_number: &str, phone: &str, source_url: &str, evidence: &str) -> Result<()> {
+    pub fn save_phone_candidates(
+        &self,
+        entity_key: &str,
+        website: &str,
+        candidates: &[PhoneCandidateRecord],
+        state: &str,
+    ) -> Result<()> {
         let conn = self.connect()?;
+        let completed_at = candidates.first().map(|item| item.observed_at.as_str());
         conn.execute(
-            "INSERT OR REPLACE INTO company_contact_overrides(corporate_number,phone,source_url,evidence_text,collected_at) VALUES(?,?,?,?,current_timestamp)",
-            duckdb::params![corporate_number, phone, source_url, evidence],
+            "INSERT OR REPLACE INTO company_phone_collection_state(entity_key,website,state,last_completed_at,last_error) VALUES(?,?,?,?,NULL)",
+            duckdb::params![entity_key, website, state, completed_at],
         )?;
+        for candidate in candidates {
+            conn.execute(
+                "INSERT OR REPLACE INTO company_phone_candidates(corporate_number,phone,phone_type,source_url,evidence_text,phone_confidence,phone_observed_at,phone_status) VALUES(?,?,?,?,?,?,?,?)",
+                duckdb::params![entity_key, candidate.phone, candidate.phone_type, candidate.source_url, candidate.evidence_text, candidate.confidence, candidate.observed_at, candidate.status],
+            )?;
+        }
+        if let Some(best) = candidates.first() {
+            conn.execute(
+                "INSERT OR REPLACE INTO company_contact_overrides(corporate_number,phone,source_url,evidence_text,phone_type,phone_confidence,phone_observed_at,phone_status) VALUES(?,?,?,?,?,?,?,?)",
+                duckdb::params![entity_key, best.phone, best.source_url, best.evidence_text, best.phone_type, best.confidence, best.observed_at, best.status],
+            )?;
+        }
         Ok(())
     }
 }
 
 fn company_from_row(row: &Row<'_>) -> duckdb::Result<Company> {
     Ok(Company {
-        corporate_number: row.get(0)?, name: row.get(1)?, prefecture: row.get(2)?, city: row.get(3)?,
-        address: row.get(4)?, kind: row.get(5)?, industry_code: row.get(6)?, industry_name: row.get(7)?,
-        industry_source: row.get(8)?, inferred_industry_code: row.get(9)?, inferred_industry_name: row.get(10)?,
-        inferred_industry_confidence: row.get(11)?, employees: row.get(12)?, capital: row.get(13)?,
-        established_year: row.get(14)?, website: row.get(15)?, phone: row.get(16)?, representative: row.get(17)?,
-        business_summary: row.get(18)?, source_updated_at: row.get(19)?,
+        corporate_number: row.get(0)?, entity_key: row.get(1)?, fuma_id: row.get(2)?, source_kind: row.get(3)?,
+        name: row.get(4)?, prefecture: row.get(5)?, city: row.get(6)?, address: row.get(7)?, kind: row.get(8)?,
+        industry_code: row.get(9)?, industry_name: row.get(10)?, industry_source: row.get(11)?,
+        industry_middle_code: row.get(12)?, industry_middle_name: row.get(13)?,
+        industry_small_code: row.get(14)?, industry_small_name: row.get(15)?,
+        industry_detail_code: row.get(16)?, industry_detail_name: row.get(17)?,
+        inferred_industry_code: row.get(18)?, inferred_industry_name: row.get(19)?,
+        inferred_industry_confidence: row.get(20)?, employees: row.get(21)?, capital: row.get(22)?,
+        established_year: row.get(23)?, website: row.get(24)?, phone: row.get(25)?, representative: row.get(26)?,
+        business_summary: row.get(27)?, source_updated_at: row.get(28)?, phone_type: row.get(29)?,
+        phone_source_url: row.get(30)?, phone_confidence: row.get(31)?, phone_evidence_text: row.get(32)?,
+        phone_observed_at: row.get(33)?, phone_status: row.get(34)?,
     })
 }
 

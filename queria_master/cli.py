@@ -169,6 +169,7 @@ def _parser() -> argparse.ArgumentParser:
     seed_parser.add_argument("--enrichment-db", type=_path)
     seed_parser.add_argument("--limit", type=int)
     seed_parser.add_argument("--source-key", default="official_site")
+    seed_parser.add_argument("--industry-major", help="JSIC大分類1文字で対象法人を限定（例: G=情報通信業）")
 
     import_enrichment_parser = sub.add_parser("import-enrichment", help="抽出器のJSONLを証拠付きで取り込む")
     import_enrichment_parser.add_argument("--enrichment-db", type=_path)
@@ -220,6 +221,7 @@ def _parser() -> argparse.ArgumentParser:
     worker_parser.add_argument("--max-bytes", type=int, default=2_000_000)
     worker_parser.add_argument("--interval-seconds", type=float, default=0.25)
     worker_parser.add_argument("--user-agent", default=None)
+    worker_parser.add_argument("--only-with-url", action="store_true", help="公式URLがある法人だけを取得対象にする")
 
     embedded_parser = sub.add_parser(
         "sync-embedded-public",
@@ -554,6 +556,7 @@ def main(argv: list[str] | None = None) -> int:
                         enrichment_path=args.enrichment_db,
                         limit=args.limit,
                         source_key=args.source_key,
+                        industry_major=args.industry_major,
                     ),
                     ensure_ascii=False,
                     indent=2,
@@ -662,6 +665,7 @@ def main(argv: list[str] | None = None) -> int:
                         interval_seconds=args.interval_seconds,
                         respect_robots=True,
                         user_agent=args.user_agent or "queria-master-enrichment/0.9 (+public-data-contact-research)",
+                        only_with_url=args.only_with_url,
                     ),
                     ensure_ascii=False,
                     indent=2,

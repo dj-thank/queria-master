@@ -70,6 +70,9 @@ pub struct SavedSearch {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Company {
     pub corporate_number: String,
+    pub entity_key: Option<String>,
+    pub fuma_id: Option<String>,
+    pub source_kind: Option<String>,
     pub name: String,
     pub prefecture: Option<String>,
     pub city: Option<String>,
@@ -78,6 +81,12 @@ pub struct Company {
     pub industry_code: Option<String>,
     pub industry_name: Option<String>,
     pub industry_source: Option<String>,
+    pub industry_middle_code: Option<String>,
+    pub industry_middle_name: Option<String>,
+    pub industry_small_code: Option<String>,
+    pub industry_small_name: Option<String>,
+    pub industry_detail_code: Option<String>,
+    pub industry_detail_name: Option<String>,
     pub inferred_industry_code: Option<String>,
     pub inferred_industry_name: Option<String>,
     pub inferred_industry_confidence: Option<f64>,
@@ -89,6 +98,12 @@ pub struct Company {
     pub representative: Option<String>,
     pub business_summary: Option<String>,
     pub source_updated_at: Option<String>,
+    pub phone_type: Option<String>,
+    pub phone_source_url: Option<String>,
+    pub phone_confidence: Option<f64>,
+    pub phone_evidence_text: Option<String>,
+    pub phone_observed_at: Option<String>,
+    pub phone_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

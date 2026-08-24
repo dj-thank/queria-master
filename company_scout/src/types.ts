@@ -27,6 +27,9 @@ export type SavedSearch = {
 
 export type Company = {
   corporate_number: string;
+  entity_key?: string | null;
+  fuma_id?: string | null;
+  source_kind?: string | null;
   name: string;
   prefecture?: string | null;
   city?: string | null;
@@ -35,6 +38,12 @@ export type Company = {
   industry_code?: string | null;
   industry_name?: string | null;
   industry_source?: string | null;
+  industry_middle_code?: string | null;
+  industry_middle_name?: string | null;
+  industry_small_code?: string | null;
+  industry_small_name?: string | null;
+  industry_detail_code?: string | null;
+  industry_detail_name?: string | null;
   inferred_industry_code?: string | null;
   inferred_industry_name?: string | null;
   inferred_industry_confidence?: number | null;
@@ -46,6 +55,12 @@ export type Company = {
   representative?: string | null;
   business_summary?: string | null;
   source_updated_at?: string | null;
+  phone_type?: string | null;
+  phone_source_url?: string | null;
+  phone_confidence?: number | null;
+  phone_evidence_text?: string | null;
+  phone_observed_at?: string | null;
+  phone_status?: string | null;
 };
 
 export type SearchResult = {
@@ -123,4 +138,12 @@ export type SalesforceJobStatus = {
 export type PhoneCollectionResult = {
   phone?: string | null;
   source_url: string;
+  candidates?: Array<{
+    phone: string;
+    phone_type: string;
+    source_url: string;
+    evidence_text: string;
+    confidence: number;
+    observed_at: string;
+  }>;
 };

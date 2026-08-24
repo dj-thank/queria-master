@@ -912,18 +912,38 @@ def _execute_local(con: Any, sql: str, *args: Any) -> Any:
     return con.execute(_local_sql(con, sql), *args)
 
 
-def _seed_company_table(con: Any, limit: int | None, company_relation: str) -> None:
+def _seed_company_table(
+    con: Any,
+    limit: int | None,
+    company_relation: str,
+    *,
+    industry_major: str | None = None,
+) -> None:
     con.execute("DROP TABLE IF EXISTS _enrichment_seed_companies")
     limit_sql = "" if limit is None else f" LIMIT {int(limit)}"
-    con.execute(
-        f"""
-        CREATE TEMP TABLE _enrichment_seed_companies AS
-        SELECT corporate_number
-        FROM {company_relation}
-        WHERE corporate_number IS NOT NULL
-        {limit_sql}
-        """
-    )
+    if industry_major:
+        con.execute(
+            f"""
+            CREATE TEMP TABLE _enrichment_seed_companies AS
+            SELECT DISTINCT c.corporate_number
+            FROM {company_relation} c
+            JOIN canonical.core.company_industries i USING (corporate_number)
+            WHERE c.corporate_number IS NOT NULL
+              AND upper(trim(i.jsic_major_code)) = ?
+            {limit_sql}
+            """,
+            [industry_major],
+        )
+    else:
+        con.execute(
+            f"""
+            CREATE TEMP TABLE _enrichment_seed_companies AS
+            SELECT corporate_number
+            FROM {company_relation}
+            WHERE corporate_number IS NOT NULL
+            {limit_sql}
+            """
+        )
 
 
 def seed_enrichment(
@@ -932,6 +952,7 @@ def seed_enrichment(
     enrichment_path: Path = DEFAULT_ENRICHMENT_DB,
     limit: int | None = None,
     source_key: str = "official_site",
+    industry_major: str | None = None,
 ) -> dict[str, Any]:
     """Create resumable tasks for a company set and seed canonical URLs as evidence."""
 
@@ -939,6 +960,10 @@ def seed_enrichment(
         raise EnrichmentError("limit は1以上で指定してください。")
     if not source_key.strip():
         raise EnrichmentError("source_key が空です。")
+    if industry_major is not None:
+        industry_major = industry_major.strip().upper()
+        if not re.fullmatch(r"[A-T]", industry_major):
+            raise EnrichmentError("industry_major はJSIC大分類の1文字（A〜T）で指定してください。")
     database_path = Path(database_path).resolve()
     enrichment_path = Path(enrichment_path).resolve()
     if database_path == enrichment_path:
@@ -951,13 +976,19 @@ def seed_enrichment(
         attached = True
         initialize_enrichment_schema(con, company_relation="canonical.core.companies")
         seed_source = "_enrichment_seed_companies"
-        if limit is None:
+        if limit is None and industry_major is None:
             # Stream the full canonical relation directly.  Materializing a
             # 5.8M-row company list before the five-way task expansion wastes
             # memory; bounded runs still use a temp subset for --limit.
             seed_source = "canonical.core.companies"
         else:
-            _seed_company_table(con, limit, "canonical.core.companies")
+            _seed_company_table(
+                con,
+                limit,
+                "canonical.core.companies",
+                industry_major=industry_major,
+            )
+            seed_source = "_enrichment_seed_companies"
         con.execute("BEGIN TRANSACTION")
         con.execute(
             _local_sql(con, f"""
@@ -1115,6 +1146,7 @@ def seed_enrichment(
             "canonical_websites": websites,
             "canonical_locations": locations,
             "states": states,
+            "industry_major": industry_major,
         }
     except Exception:
         try:
@@ -1575,6 +1607,7 @@ def claim_enrichment_tasks(
     source_key: str | None = None,
     batch_size: int = 100,
     lease_seconds: int = 900,
+    require_url: bool = False,
 ) -> list[dict[str, Any]]:
     if not worker_id.strip():
         raise EnrichmentError("worker_idが空です。")
@@ -1592,23 +1625,31 @@ def claim_enrichment_tasks(
         initialize_enrichment_schema(con, company_relation="canonical.core.companies")
         con.execute("BEGIN TRANSACTION")
         clauses = [
-            "(state = 'pending' OR (state = 'leased' AND (lease_until IS NULL OR lease_until < ?)))",
-            "(next_attempt_at IS NULL OR next_attempt_at <= ?)",
+            "(st.state = 'pending' OR (st.state = 'leased' AND (st.lease_until IS NULL OR st.lease_until < ?)))",
+            "(st.next_attempt_at IS NULL OR st.next_attempt_at <= ?)",
         ]
         params: list[Any] = [now, now]
         if field_name:
-            clauses.append("field_name = ?")
+            clauses.append("st.field_name = ?")
             params.append(field_name)
         if source_key:
-            clauses.append("source_key = ?")
+            clauses.append("st.source_key = ?")
             params.append(source_key)
+        if require_url:
+            clauses.append(
+                "EXISTS ("
+                "SELECT 1 FROM canonical.core.companies c "
+                "WHERE c.corporate_number = st.corporate_number "
+                "AND nullif(trim(c.company_url), '') IS NOT NULL"
+                ")"
+            )
         rows = _execute_local(
             con,
             f"""
-            SELECT corporate_number, field_name, source_key
-            FROM enrichment.enrichment_state
+            SELECT st.corporate_number, st.field_name, st.source_key
+            FROM enrichment.enrichment_state st
             WHERE {' AND '.join(clauses)}
-            ORDER BY updated_at, corporate_number
+            ORDER BY st.updated_at, st.corporate_number
             LIMIT ?
             """,
             [*params, batch_size],

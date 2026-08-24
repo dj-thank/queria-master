@@ -46,12 +46,25 @@ class PackageContractTests(unittest.TestCase):
             r"\b(?=[A-Za-z0-9]{0,31}[A-Z])(?=[A-Za-z0-9]{0,31}[a-z])"
             r"(?=[A-Za-z0-9]{0,31}[0-9])[A-Za-z0-9]{32}\b"
         )
-        skip = {".git", ".venv", "__pycache__", ".pytest_cache", "build", "dist"}
+        skip = {
+            ".git",
+            ".venv",
+            "__pycache__",
+            ".pytest_cache",
+            "build",
+            "dist",
+            "node_modules",
+            "target",
+            "work",
+        }
         for path in ROOT.rglob("*"):
             if (
                 not path.is_file()
-                or path.suffix.lower() in {".zip", ".duckdb", ".parquet", ".pyc"}
-                or any(part in skip or part.endswith(".egg-info") for part in path.relative_to(ROOT).parts)
+                or path.suffix.lower() in {".zip", ".duckdb", ".sqlite", ".db", ".parquet", ".pyc", ".exe", ".dll"}
+                or any(
+                    part in skip or part.startswith(".test-tmp") or part.endswith(".egg-info")
+                    for part in path.relative_to(ROOT).parts
+                )
                 or path.name == "MANIFEST.sha256"
                 or (
                     path.relative_to(ROOT).parts[0] in {"data", "cache", "exports"}

@@ -16,8 +16,8 @@
 
 ```powershell
 python scripts\join_full_app_bundle.py `
-  --manifest .\queria-master-0.8.0-full-app.parts.json `
-  --out .\queria-master-0.8.0-full-app.zip
+  --manifest .\queria-master-0.9.0-full-app.parts.json `
+  --out .\queria-master-0.9.0-full-app.zip
 ```
 
 スクリプトは各partと結合後のZIPの両方をSHA-256検証し、不一致時は完成ファイルを確定しません。
@@ -26,8 +26,21 @@ python scripts\join_full_app_bundle.py `
 
 ```powershell
 python scripts\split_full_app_bundle.py `
-  --input F:\QueriaReleases\queria-master-0.8.0-full-app.zip `
-  --out-dir F:\QueriaReleases\queria-master-0.8.0-full-app-parts
+  --input F:\QueriaReleases\queria-master-0.9.0-full-app.zip `
+  --out-dir F:\QueriaReleases\queria-master-0.9.0-full-app-parts
 ```
 
 GitHub Release assetは1ファイル2GiB未満に保ち、Gitリポジトリ本体へDBをコミットしません。DBを何度も更新する場合は、Releaseをバージョンごとに作成し、古いassetを削除せず履歴として保持します。
+
+## 大分類G専用DB
+
+大分類G専用DBは完全版71GBを再配布せず、次の小型成果物をReleaseへ個別アップロードします。
+
+- `queria_master_g_fuma.duckdb`: 正本DB
+- `queria_runtime_g_fuma.duckdb`: アプリ用読取DB
+- `search_g_fuma.sqlite`: 高速検索索引
+- `phone_targets_g37_41.csv`: 未取得連絡先の再開用状態
+- `source_metadata.json`, `audit.json`, `README_PORTABLE_JA.md`: 出典・完全性・操作説明
+- `CompanyMaster-G37-41.exe`: Windowsアプリ
+
+リポジトリ本体にはバイナリDBをコミットしません。`scripts/publish_g_release.ps1`は監査JSONとのSHA-256一致、WAL不在、個人ローカルパス不在を確認してからReleaseへアップロードします。
