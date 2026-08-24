@@ -80,6 +80,12 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt
           rustup default stable
+      - name: Create CI-only bundled runtime placeholder
+        # tauri-build validates declared resources during `cargo test`; the
+        # Windows packaging workflow fetches and verifies the pinned runtime.
+        run: |
+          mkdir -p company_scout/src-tauri/resources/bin
+          : > company_scout/src-tauri/resources/bin/codex.exe
       - name: Check formatting
         run: cargo fmt --manifest-path company_scout/src-tauri/Cargo.toml --all -- --check
       - name: Test locked dependency graph
