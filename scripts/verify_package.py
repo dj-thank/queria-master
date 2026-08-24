@@ -98,7 +98,11 @@ def package_files() -> list[Path]:
         # Exported source archives do not contain .git. In that environment
         # the archive itself is the trust boundary, so enumerate its files.
         candidates = list(ROOT.rglob("*"))
-    return [path for path in sorted(candidates) if _is_release_file(path)]
+    ordered = sorted(
+        candidates,
+        key=lambda path: path.relative_to(ROOT).as_posix().encode("utf-8"),
+    )
+    return [path for path in ordered if _is_release_file(path)]
 
 
 def release_bytes(path: Path) -> bytes:
