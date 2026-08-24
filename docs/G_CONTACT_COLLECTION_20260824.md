@@ -56,3 +56,20 @@
 前回runを継続する場合は `prior_run_id` を指定する。各シャードのprior manifestが現在manifestとbyte一致した場合だけprogress JSONLを復元し、不一致、欠落、非数値inputは開始前にfail closedする。新しいmerge経路ではprogressが必須であり、manifestだけを処理済み証拠にする旧挙動は明示的なlegacy flagへ隔離した。
 
 このrepositoryはpublicなので、workflowは32文字以上のrepository secret `G_CONTACT_ARTIFACT_KEY` を必須にし、job間・run間で保持するtarget、manifest、progress、候補、merge結果をAES-256-CBC/PBKDF2で暗号化してからActions artifactへ置く。平文artifactはuploadしない。artifactは90日保持であり、鍵を変更すると既存runから再開できない。ReleaseやGit履歴へ候補データを自動公開しない。
+
+## 情シス子会社・SES営業優先JSON（v1）
+
+同じworkflowは、Release generationへ照合済みのtargetを、JSIC中分類、企業名、従業員規模による弱いseed scoreで先に並べる。これは収集順の最適化にだけ使い、情シス子会社・SESという事実の確定には使わない。
+
+既存の安全な公式サイト取得中に、次の語彙に一致した最大240文字の本文抜粋、同一ホストURL、抜粋SHA-256、取得時刻だけをprogress JSONL schema v2へ追加する。HTML全文は保存しない。
+
+- 情報システム子会社、ユーザー系IT、親会社・グループ関係
+- SES、技術者派遣、客先・オンサイト常駐
+- SI、受託開発、運用保守
+- 採用、同一ホストのお問い合わせフォーム
+
+merge時に `schemas/it-subsidiary-ses-priority-v1.schema.json` で全行を検証し、`g_ses_priority_profiles.jsonl` を正本として、営業確認用CSVと集計JSONを一方向生成する。電話は公式サイト由来でも `candidate_needs_review` のまま、FAXは営業電話・voice成功から除外し監査用の `excluded` 行としてだけ保持する。親会社名が抽出できないグループ文言はcandidate、欠落はunknownである。`promotion_authorized` は常にfalseで、自動確認済み昇格は行わない。
+
+旧schema v1のprogressはprofile未確認として扱う。`--retry-missing-profile` により旧行だけを再取得でき、同一manifestのv2進捗は通常どおり再開する。最終batch内のプロフィール4ファイルも暗号化され、受信者暗号化exportだけが1日保持の復号可能経路になる。
+
+Luna evidence laneとRunnerの役割、packet契約、root受入条件は [`LUNA_SES_EVIDENCE_WORKFLOW_JA.md`](LUNA_SES_EVIDENCE_WORKFLOW_JA.md) に分離した。

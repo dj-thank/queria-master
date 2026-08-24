@@ -59,13 +59,29 @@ jobs:
           test -s plaintext/g_public_contacts.csv
           test -s plaintext/g_collection_summary.json
           FILE_COUNT="$(find plaintext -type f | wc -l)"
-          [[ "$FILE_COUNT" == "3" ]]
+          PROFILE_FILE_COUNT=0
+          for profile_file in \
+              g_ses_priority_profiles.jsonl g_ses_priority_profiles.csv \
+              g_ses_priority_summary.json g_ses_priority_seed_summary.json; do
+            if [[ -s "plaintext/${profile_file}" ]]; then
+              PROFILE_FILE_COUNT=$((PROFILE_FILE_COUNT + 1))
+            fi
+          done
+          [[ "$PROFILE_FILE_COUNT" == "0" || "$PROFILE_FILE_COUNT" == "4" ]]
+          EXPECTED_FILE_COUNT=$((3 + PROFILE_FILE_COUNT))
+          [[ "$FILE_COUNT" == "$EXPECTED_FILE_COUNT" ]]
 
           printf '%s' "$RECIPIENT_PUBLIC_KEY_B64" | base64 --decode > export/recipient-public.pem
           openssl pkey -pubin -in export/recipient-public.pem -noout
           openssl rand -base64 48 | tr -d '\n' > export/passphrase
-          tar -C plaintext -czf export/g-contact-export.tar.gz \
-            g_contact_targets.csv g_public_contacts.csv g_collection_summary.json
+          EXPORT_FILES=(g_contact_targets.csv g_public_contacts.csv g_collection_summary.json)
+          if [[ "$PROFILE_FILE_COUNT" == "4" ]]; then
+            EXPORT_FILES+=(
+              g_ses_priority_profiles.jsonl g_ses_priority_profiles.csv
+              g_ses_priority_summary.json g_ses_priority_seed_summary.json
+            )
+          fi
+          tar -C plaintext -czf export/g-contact-export.tar.gz "${EXPORT_FILES[@]}"
           openssl enc -aes-256-cbc -pbkdf2 -salt \
             -pass file:export/passphrase \
             -in export/g-contact-export.tar.gz \
@@ -86,6 +102,8 @@ jobs:
             "source_run_id": ${SOURCE_RUN_ID},
             "export_workflow_head_sha": "${GITHUB_SHA}",
             "cipher": "AES-256-CBC/PBKDF2 with RSA-OAEP-SHA256 wrapped passphrase",
+            "plaintext_file_count": ${EXPECTED_FILE_COUNT},
+            "ses_priority_profiles_included": $([[ "$PROFILE_FILE_COUNT" == "4" ]] && echo true || echo false),
             "payload_sha256": "${PAYLOAD_SHA256}",
             "wrapped_key_sha256": "${KEY_SHA256}",
             "plaintext_uploaded": false

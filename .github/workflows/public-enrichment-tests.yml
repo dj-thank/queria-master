@@ -5,11 +5,13 @@ on:
     paths:
       - "company_scout/public_enrichment/**"
       - ".github/workflows/g-contact-collection.yml"
+      - ".github/workflows/g-contact-secure-export.yml"
       - ".github/workflows/public-enrichment-tests.yml"
   pull_request:
     paths:
       - "company_scout/public_enrichment/**"
       - ".github/workflows/g-contact-collection.yml"
+      - ".github/workflows/g-contact-secure-export.yml"
       - ".github/workflows/public-enrichment-tests.yml"
 
 permissions:
@@ -29,7 +31,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         working-directory: company_scout/public_enrichment
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install -r requirements.txt "pytest>=8,<10"
       - name: Compile
         working-directory: company_scout/public_enrichment
         run: >-
@@ -37,6 +39,8 @@ jobs:
           public_data_enricher.py
           edinet_salary_enricher.py
           official_site_phone_enricher.py
+          business_profile.py
+          ses_priority_json.py
           import_verified_contacts.py
           jsic39_collection.py
           jsic_g37_41_collection.py
@@ -44,4 +48,4 @@ jobs:
           corporate_index_matcher.py
       - name: Unit tests
         working-directory: company_scout/public_enrichment
-        run: python -m unittest discover -s tests -v
+        run: python -m pytest tests -q

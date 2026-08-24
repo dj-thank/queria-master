@@ -14,6 +14,7 @@
 - 法人番号確定済み企業だけへ基本・財務・職場情報を結合
 - EDINET XBRLから平均年齢・平均年間給与を抽出
 - 企業公式サイトから電話番号候補と根拠URLを取得
+- 公式サイトの限定抜粋から情シス子会社・SES/SI・受託・運用保守の営業優先根拠JSONを生成
 - 公式根拠付きの検証済み連絡先リファレンスをローカルDBへ反映
 - 年度別財務、最新財務、コアキーワード、JSIC単位ランキングを出力
 - 取込元、SHA-256、照合状態、要確認理由を監査可能な形で保存
@@ -185,6 +186,25 @@ python official_site_phone_enricher.py \
 - 根拠URLが公式サイトと異なる結果は取込拒否
 
 自動抽出した番号は候補です。FAX、支店、採用、広報など用途の最終判定には根拠URLを確認してください。
+
+同じ取得処理は、HTML全文を保存せず、事業シグナルの最大240文字の抜粋、同一ホストURL、SHA-256だけをprogress JSONL schema v2へ保持します。`ses_priority_json.py` は次を提供します。
+
+```bash
+python ses_priority_json.py prioritize-targets \
+  --input phone_targets_enriched.csv \
+  --output phone_targets_prioritized.csv \
+  --summary ses_priority_seed_summary.json
+
+python ses_priority_json.py export \
+  --targets phone_targets_prioritized.csv \
+  --manifest 'work/shard-*/manifest.csv' \
+  --progress 'work/shard-*/progress.jsonl' \
+  --jsonl output/ses_priority_profiles.jsonl \
+  --csv output/ses_priority_profiles.csv \
+  --summary output/ses_priority_summary.json
+```
+
+seed scoreはクロール順だけに使う弱い推定です。最終A/B/Cは公式サイト本文の根拠と連絡可能性から決定しますが、電話は全件 `candidate_needs_review`、親会社関係は明示文言があっても名称確認前はcandidateです。
 
 ## 検証済み公式連絡先リファレンス
 
