@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -271,3 +272,57 @@ def test_export_rejects_cross_host_phone_candidate_even_when_other_bindings_matc
             csv_output=tmp_path / "out.csv",
             summary_output=tmp_path / "out-summary.json",
         )
+
+
+def test_export_deduplicates_and_bounds_many_same_host_contact_forms(tmp_path: Path) -> None:
+    targets = tmp_path / "targets.csv"
+    manifest = tmp_path / "manifest.csv"
+    progress = tmp_path / "progress.jsonl"
+    write_targets(targets)
+    write_manifest(manifest, "1000000000001", "https://alpha.example/")
+    facts = []
+    for index in range(60):
+        excerpt = f"お問い合わせ {index}"
+        facts.append({
+            "signal": "contact_form",
+            "status": "observed_text",
+            "evidence_url": f"https://alpha.example/contact/?t={index}",
+            "excerpt": excerpt,
+            "excerpt_sha256": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+            "observed_at": "2026-08-25T00:00:00+00:00",
+        })
+    progress.write_text(json.dumps({
+        "schema_version": 2,
+        "corporate_number": "1000000000001",
+        "official_site_url": "https://alpha.example/",
+        "scope_label": "G37-G41",
+        "dataset_generation": "g-test",
+        "runtime_binding_status": "matched",
+        "target_binding_sha256": business_profile.target_binding_sha256(
+            corporate_number="1000000000001",
+            official_site_url="https://alpha.example/",
+            scope_label="G37-G41",
+            dataset_generation="g-test",
+            runtime_binding_status="matched",
+        ),
+        "state": "processed_no_phone",
+        "pages_fetched": 1,
+        "candidates": [],
+        "business_profile": {"schema_version": 1, "facts": facts, "parent_company_candidates": [], "unknowns": []},
+        "completed_at": "2026-08-25T00:00:00+00:00",
+    }) + "\n", encoding="utf-8")
+    jsonl = tmp_path / "out.jsonl"
+
+    priority.export_priority(
+        targets=targets,
+        manifest_patterns=[str(manifest)],
+        progress_patterns=[str(progress)],
+        schema=SCHEMA,
+        jsonl_output=jsonl,
+        csv_output=tmp_path / "out.csv",
+        summary_output=tmp_path / "out-summary.json",
+    )
+
+    record = next(json.loads(line) for line in jsonl.read_text(encoding="utf-8").splitlines())
+    assert len(record["official_site"]["evidence"]) <= 50
+    assert len(record["contact_evidence"]) <= 20
