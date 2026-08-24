@@ -18,6 +18,8 @@ from urllib.parse import urldefrag, urljoin, urlparse
 PROFILE_SCHEMA_VERSION = 1
 SCORE_FORMULA_VERSION = "it-subsidiary-ses-v1"
 MAX_EXCERPT_CHARS = 240
+MAX_PROFILE_FACTS = 50
+MAX_CONTACT_FORM_FACTS = 10
 
 SIGNAL_PATTERNS: dict[str, tuple[str, ...]] = {
     "it_subsidiary": (
@@ -253,7 +255,7 @@ def merge_business_profiles(profiles: Iterable[dict[str, Any]]) -> dict[str, Any
             )
             if all(key):
                 parent_candidates[key] = dict(candidate)
-    ordered = [facts[key] for key in sorted(facts)]
+    ordered = bound_profile_facts(facts.values())
     present = {str(item["signal"]) for item in ordered}
     return {
         "schema_version": PROFILE_SCHEMA_VERSION,
@@ -261,6 +263,26 @@ def merge_business_profiles(profiles: Iterable[dict[str, Any]]) -> dict[str, Any
         "parent_company_candidates": [parent_candidates[key] for key in sorted(parent_candidates)],
         "unknowns": [dimension for dimension in PROFILE_DIMENSIONS if dimension not in present],
     }
+
+
+def bound_profile_facts(facts: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate and cap lexical evidence before durable/export use."""
+    non_contact: dict[tuple[str, str, str], dict[str, Any]] = {}
+    contact_forms: dict[str, dict[str, Any]] = {}
+    for raw in facts:
+        fact = dict(raw)
+        signal = str(fact.get("signal") or "")
+        url = str(fact.get("evidence_url") or "")
+        digest = str(fact.get("excerpt_sha256") or "")
+        if not signal or not url or not digest:
+            continue
+        if signal == "contact_form":
+            contact_forms.setdefault(url, fact)
+        else:
+            non_contact[(signal, url, digest)] = fact
+    ordered_non_contact = [non_contact[key] for key in sorted(non_contact)][: MAX_PROFILE_FACTS - MAX_CONTACT_FORM_FACTS]
+    ordered_forms = [contact_forms[key] for key in sorted(contact_forms)][:MAX_CONTACT_FORM_FACTS]
+    return [*ordered_non_contact, *ordered_forms]
 
 
 def validate_profile_evidence_host(profile: dict[str, Any], official_site_url: str) -> bool:

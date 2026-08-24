@@ -16,6 +16,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 from business_profile import (
     SCORE_FORMULA_VERSION,
+    bound_profile_facts,
     empty_business_profile,
     official_site_binding,
     score_business_profile,
@@ -329,7 +330,7 @@ def _record_from_target(row: dict[str, str], progress: dict[str, Any] | None) ->
     progress = progress or {}
     website = normalize_url(row.get("website") or row.get("company_url"))
     profile = progress.get("business_profile") if isinstance(progress.get("business_profile"), dict) else empty_business_profile()
-    facts = [_evidence_copy(item) for item in profile.get("facts") or []]
+    facts = [_evidence_copy(item) for item in bound_profile_facts(profile.get("facts") or [])]
     if website and not validate_profile_evidence_host({"facts": facts}, website):
         raise ValueError(f"Profile evidence host mismatch during export: {clean(row.get('corporate_number'))}")
     candidates = [dict(item) for item in progress.get("candidates") or []]
