@@ -332,7 +332,11 @@ def _record_from_target(row: dict[str, str], progress: dict[str, Any] | None) ->
     website = normalize_url(row.get("website") or row.get("company_url"))
     profile = progress.get("business_profile") if isinstance(progress.get("business_profile"), dict) else empty_business_profile()
     facts = [_evidence_copy(item) for item in bound_profile_facts(profile.get("facts") or [])]
-    if website and not validate_profile_evidence_host({"facts": facts}, website):
+    target_host = official_site_binding(website)[0]
+    if website and any(
+        official_site_binding(fact.get("evidence_url"))[0] != target_host
+        for fact in facts
+    ):
         raise ValueError(f"Profile evidence host mismatch during export: {clean(row.get('corporate_number'))}")
     candidates = [dict(item) for item in progress.get("candidates") or []]
     state = clean(progress.get("state")) or clean(row.get("state")) or "not_processed"
