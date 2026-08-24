@@ -56,6 +56,20 @@ def write_targets(path: Path) -> None:
         writer.writerows(rows)
 
 
+def write_manifest(path: Path, corporate_number: str, website: str) -> None:
+    fields = ["法人番号", "公式サイトURL", "スコープ", "データ世代", "正本照合"]
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow({
+            "法人番号": corporate_number,
+            "公式サイトURL": website,
+            "スコープ": "G37-G41",
+            "データ世代": "g-test",
+            "正本照合": "matched",
+        })
+
+
 def test_prioritize_targets_prefers_mid_size_jsic39_it_signal(tmp_path: Path) -> None:
     source = tmp_path / "targets.csv"
     output = tmp_path / "prioritized.csv"
@@ -83,12 +97,23 @@ def test_export_builds_schema_valid_candidate_only_priority_records(tmp_path: Pa
         observed_at="2026-08-25T00:00:00+00:00",
     )
     progress = tmp_path / "progress.jsonl"
+    manifest = tmp_path / "manifest.csv"
+    write_manifest(manifest, "1000000000002", "https://beta.example/")
     progress.write_text(
         json.dumps({
             "schema_version": 2,
             "corporate_number": "1000000000002",
             "official_site_url": "https://beta.example/",
             "dataset_generation": "g-test",
+            "scope_label": "G37-G41",
+            "runtime_binding_status": "matched",
+            "target_binding_sha256": business_profile.target_binding_sha256(
+                corporate_number="1000000000002",
+                official_site_url="https://beta.example/",
+                scope_label="G37-G41",
+                dataset_generation="g-test",
+                runtime_binding_status="matched",
+            ),
             "state": "phone_candidate_found",
             "pages_fetched": 2,
             "candidates": [{
@@ -107,6 +132,7 @@ def test_export_builds_schema_valid_candidate_only_priority_records(tmp_path: Pa
 
     result = priority.export_priority(
         targets=targets,
+        manifest_patterns=[str(manifest)],
         progress_patterns=[str(progress)],
         schema=SCHEMA,
         jsonl_output=jsonl,
@@ -143,6 +169,8 @@ def test_export_rejects_duplicate_company_across_progress_shards(tmp_path: Path)
     }
     first = tmp_path / "first.jsonl"
     second = tmp_path / "second.jsonl"
+    manifest = tmp_path / "manifest.csv"
+    write_manifest(manifest, "1000000000001", "https://alpha.example/")
     payload = json.dumps(record) + "\n"
     first.write_text(payload, encoding="utf-8")
     second.write_text(payload, encoding="utf-8")
@@ -150,6 +178,7 @@ def test_export_rejects_duplicate_company_across_progress_shards(tmp_path: Path)
     with pytest.raises(ValueError, match="Duplicate company across progress shards"):
         priority.export_priority(
             targets=targets,
+            manifest_patterns=[str(manifest)],
             progress_patterns=[str(first), str(second)],
             schema=SCHEMA,
             jsonl_output=tmp_path / "out.jsonl",
@@ -166,17 +195,70 @@ def test_export_rejects_cross_host_business_evidence(tmp_path: Path) -> None:
         "SES",
     )
     progress = tmp_path / "bad.jsonl"
+    manifest = tmp_path / "manifest.csv"
+    write_manifest(manifest, "1000000000001", "https://alpha.example/")
     progress.write_text(json.dumps({
         "schema_version": 2,
         "corporate_number": "1000000000001",
-        "official_site_url": "https://alpha.example/",
+        "official_site_url": "https://wrong.example/",
+        "scope_label": "G37-G41",
+        "dataset_generation": "g-test",
+        "runtime_binding_status": "matched",
+        "target_binding_sha256": business_profile.target_binding_sha256(
+            corporate_number="1000000000001",
+            official_site_url="https://wrong.example/",
+            scope_label="G37-G41",
+            dataset_generation="g-test",
+            runtime_binding_status="matched",
+        ),
         "state": "processed_no_phone",
         "candidates": [],
         "business_profile": bad_profile,
     }) + "\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="Profile evidence host mismatch"):
+    with pytest.raises(ValueError, match="Progress export official_site mismatch"):
         priority.export_priority(
             targets=targets,
+            manifest_patterns=[str(manifest)],
+            progress_patterns=[str(progress)],
+            schema=SCHEMA,
+            jsonl_output=tmp_path / "out.jsonl",
+            csv_output=tmp_path / "out.csv",
+            summary_output=tmp_path / "out-summary.json",
+        )
+
+
+def test_export_rejects_cross_host_phone_candidate_even_when_other_bindings_match(tmp_path: Path) -> None:
+    targets = tmp_path / "targets.csv"
+    manifest = tmp_path / "manifest.csv"
+    progress = tmp_path / "progress.jsonl"
+    write_targets(targets)
+    write_manifest(manifest, "1000000000001", "https://alpha.example/")
+    progress.write_text(json.dumps({
+        "schema_version": 2,
+        "corporate_number": "1000000000001",
+        "official_site_url": "https://alpha.example/",
+        "scope_label": "G37-G41",
+        "dataset_generation": "g-test",
+        "runtime_binding_status": "matched",
+        "target_binding_sha256": business_profile.target_binding_sha256(
+            corporate_number="1000000000001",
+            official_site_url="https://alpha.example/",
+            scope_label="G37-G41",
+            dataset_generation="g-test",
+            runtime_binding_status="matched",
+        ),
+        "state": "phone_candidate_found",
+        "candidates": [{
+            "phone": "0312345678",
+            "candidate_type": "代表電話",
+            "url": "https://evil.example/contact",
+        }],
+        "business_profile": business_profile.empty_business_profile(),
+    }) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Progress candidate evidence host mismatch"):
+        priority.export_priority(
+            targets=targets,
+            manifest_patterns=[str(manifest)],
             progress_patterns=[str(progress)],
             schema=SCHEMA,
             jsonl_output=tmp_path / "out.jsonl",

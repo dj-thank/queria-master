@@ -197,6 +197,7 @@ python ses_priority_json.py prioritize-targets \
 
 python ses_priority_json.py export \
   --targets phone_targets_prioritized.csv \
+  --manifest 'work/shard-*/manifest.csv' \
   --progress 'work/shard-*/progress.jsonl' \
   --jsonl output/ses_priority_profiles.jsonl \
   --csv output/ses_priority_profiles.csv \

@@ -17,7 +17,9 @@ from urllib.parse import urlparse
 from business_profile import (
     SCORE_FORMULA_VERSION,
     empty_business_profile,
+    official_site_binding,
     score_business_profile,
+    target_binding_sha256,
     validate_profile_evidence_host,
 )
 
@@ -225,6 +227,83 @@ def load_progress(patterns: Iterable[str]) -> tuple[dict[str, dict[str, Any]], l
     return by_company, paths
 
 
+def load_manifests(patterns: Iterable[str]) -> tuple[dict[str, dict[str, str]], list[Path]]:
+    by_company: dict[str, dict[str, str]] = {}
+    paths = _expand(patterns)
+    if not paths:
+        raise FileNotFoundError("No manifest files were found")
+    for path in paths:
+        _fields, rows = read_csv(path)
+        for row in rows:
+            corporate_number = clean(row.get("法人番号"))
+            if not re.fullmatch(r"[0-9]{13}", corporate_number):
+                raise ValueError(f"Invalid manifest corporate number: {path}")
+            if corporate_number in by_company:
+                raise ValueError(f"Duplicate company across manifests: {corporate_number}")
+            by_company[corporate_number] = row
+    return by_company, paths
+
+
+def validate_progress_export_binding(
+    target: dict[str, str],
+    manifest: dict[str, str],
+    progress: dict[str, Any],
+) -> None:
+    corporate_number = clean(target.get("corporate_number"))
+    target_url = clean(target.get("website") or target.get("company_url"))
+    bindings = {
+        "corporate_number": (
+            corporate_number,
+            clean(manifest.get("法人番号")),
+            clean(progress.get("corporate_number")),
+        ),
+        "official_site": (
+            official_site_binding(target_url),
+            official_site_binding(manifest.get("公式サイトURL")),
+            official_site_binding(progress.get("official_site_url")),
+        ),
+        "scope_label": (
+            clean(target.get("scope_label")),
+            clean(manifest.get("スコープ")),
+            clean(progress.get("scope_label")),
+        ),
+        "dataset_generation": (
+            clean(target.get("dataset_generation")),
+            clean(manifest.get("データ世代")),
+            clean(progress.get("dataset_generation")),
+        ),
+        "runtime_binding_status": (
+            clean(target.get("runtime_binding_status")),
+            clean(manifest.get("正本照合")),
+            clean(progress.get("runtime_binding_status")),
+        ),
+    }
+    for field, values in bindings.items():
+        if not values[0] or values[0] != values[1] or values[0] != values[2]:
+            raise ValueError(f"Progress export {field} mismatch: {corporate_number}")
+    if int(progress.get("schema_version") or 1) < 2:
+        raise ValueError(f"Progress schema must be upgraded before profile export: {corporate_number}")
+    expected_hash = target_binding_sha256(
+        corporate_number=corporate_number,
+        official_site_url=target_url,
+        scope_label=target.get("scope_label"),
+        dataset_generation=target.get("dataset_generation"),
+        runtime_binding_status=target.get("runtime_binding_status"),
+    )
+    if clean(progress.get("target_binding_sha256")) != expected_hash:
+        raise ValueError(f"Progress export target binding hash mismatch: {corporate_number}")
+    target_host = official_site_binding(target_url)[0]
+    for candidate in progress.get("candidates") or []:
+        if not normalize_phone(candidate.get("phone")):
+            raise ValueError(f"Invalid progress phone during export: {corporate_number}")
+        evidence_url = normalize_url(candidate.get("url"))
+        if not evidence_url or official_site_binding(evidence_url)[0] != target_host:
+            raise ValueError(f"Progress candidate evidence host mismatch: {corporate_number}")
+    profile = progress.get("business_profile")
+    if not isinstance(profile, dict) or not validate_profile_evidence_host(profile, target_url):
+        raise ValueError(f"Progress business profile binding mismatch: {corporate_number}")
+
+
 def _evidence_copy(fact: dict[str, Any]) -> dict[str, Any]:
     return {
         "signal": clean(fact.get("signal")),
@@ -267,6 +346,8 @@ def _record_from_target(row: dict[str, str], progress: dict[str, Any] | None) ->
             "type": PHONE_TYPE_MAP.get(candidate_type, "unclassified"),
             "evidence_url": evidence_url,
             "review_status": "excluded" if excluded else "candidate_needs_review",
+            "source_kind": "official_site",
+            "binding_status": "same_host",
         })
     for fact in facts:
         if fact["signal"] == "contact_form":
@@ -276,6 +357,8 @@ def _record_from_target(row: dict[str, str], progress: dict[str, Any] | None) ->
                 "type": "form",
                 "evidence_url": fact["evidence_url"],
                 "review_status": "candidate_needs_review",
+                "source_kind": "official_site",
+                "binding_status": "same_host",
             })
     contacts.sort(key=lambda item: (item["channel"], item["type"], item["value"] or "", item["evidence_url"]))
 
@@ -401,6 +484,7 @@ CSV_FIELDS = [
 def export_priority(
     *,
     targets: Path,
+    manifest_patterns: list[str],
     progress_patterns: list[str],
     schema: Path,
     jsonl_output: Path,
@@ -409,6 +493,27 @@ def export_priority(
 ) -> dict[str, Any]:
     _fields, rows = read_csv(targets)
     progress, progress_files = load_progress(progress_patterns)
+    manifests, manifest_files = load_manifests(manifest_patterns)
+    if set(progress) != set(manifests):
+        missing_progress = sorted(set(manifests).difference(progress))
+        outside_manifest = sorted(set(progress).difference(manifests))
+        raise ValueError(
+            f"Progress/manifest company mismatch: missing_progress={missing_progress[:5]}, "
+            f"outside_manifest={outside_manifest[:5]}"
+        )
+    target_by_corporate: dict[str, dict[str, str]] = {}
+    for row in rows:
+        corporate_number = clean(row.get("corporate_number"))
+        if not corporate_number:
+            continue
+        if corporate_number in target_by_corporate:
+            raise ValueError(f"Duplicate corporate number in export targets: {corporate_number}")
+        target_by_corporate[corporate_number] = row
+    for corporate_number, progress_record in progress.items():
+        target = target_by_corporate.get(corporate_number)
+        if target is None:
+            raise ValueError(f"Progress company is outside export targets: {corporate_number}")
+        validate_progress_export_binding(target, manifests[corporate_number], progress_record)
     schema_object = json.loads(schema.read_text(encoding="utf-8"))
     from jsonschema import Draft202012Validator, FormatChecker
 
@@ -465,6 +570,7 @@ def export_priority(
         "jsonl_sha256": file_sha256(jsonl_output),
         "csv_sha256": file_sha256(csv_output),
         "progress_files": [str(path) for path in progress_files],
+        "manifest_files": [str(path) for path in manifest_files],
         "outputs": {"jsonl": str(jsonl_output), "csv": str(csv_output)},
     }
     summary_output.parent.mkdir(parents=True, exist_ok=True)
@@ -481,6 +587,7 @@ def build_parser() -> argparse.ArgumentParser:
     prioritize.add_argument("--summary", type=Path, required=True)
     export = commands.add_parser("export")
     export.add_argument("--targets", type=Path, required=True)
+    export.add_argument("--manifest", action="append", required=True)
     export.add_argument("--progress", action="append", required=True)
     export.add_argument("--schema", type=Path, default=Path("schemas/it-subsidiary-ses-priority-v1.schema.json"))
     export.add_argument("--jsonl", type=Path, required=True)
@@ -496,6 +603,7 @@ def main() -> int:
     else:
         result = export_priority(
             targets=args.targets,
+            manifest_patterns=args.manifest,
             progress_patterns=args.progress,
             schema=args.schema,
             jsonl_output=args.jsonl,

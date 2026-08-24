@@ -26,6 +26,7 @@ from business_profile import (
     empty_business_profile,
     extract_business_profile_evidence,
     merge_business_profiles,
+    target_binding_sha256,
     validate_profile_evidence_host,
 )
 
@@ -587,6 +588,16 @@ def validate_progress_bindings(targets: list[Any], progress_by_company: dict[str
             progress_value = str(record.get(field) or "").strip()
             if target_value != progress_value:
                 raise ValueError(f"{field} mismatch in progress: {corporate_number}")
+        if int(record.get("schema_version") or 1) >= 2:
+            expected_binding = target_binding_sha256(
+                corporate_number=corporate_number,
+                official_site_url=target_url,
+                scope_label=_row_value(row, "scope_label"),
+                dataset_generation=_row_value(row, "dataset_generation"),
+                runtime_binding_status=_row_value(row, "runtime_binding_status"),
+            )
+            if str(record.get("target_binding_sha256") or "") != expected_binding:
+                raise ValueError(f"target binding hash mismatch in progress: {corporate_number}")
         target_host = official_site_binding(target_url)[0]
         for candidate in record.get("candidates") or []:
             evidence_url = str(candidate.get("url") or "")
@@ -834,6 +845,13 @@ def collect_targets(
             "scope_label": _row_value(row, "scope_label"),
             "dataset_generation": _row_value(row, "dataset_generation"),
             "runtime_binding_status": _row_value(row, "runtime_binding_status"),
+            "target_binding_sha256": target_binding_sha256(
+                corporate_number=corporate_number,
+                official_site_url=_row_value(row, "website_url"),
+                scope_label=_row_value(row, "scope_label"),
+                dataset_generation=_row_value(row, "dataset_generation"),
+                runtime_binding_status=_row_value(row, "runtime_binding_status"),
+            ),
             "state": state,
             "pages_fetched": result.get("pages_fetched"),
             "reason": result.get("reason"),

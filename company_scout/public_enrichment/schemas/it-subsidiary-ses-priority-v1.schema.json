@@ -84,7 +84,9 @@
           "value": {"type": ["string", "null"]},
           "type": {"enum": ["representative", "head_office", "inquiry", "recruiting", "support", "ir", "privacy", "branch", "fax", "unclassified", "form"]},
           "evidence_url": {"type": "string", "format": "uri"},
-          "review_status": {"enum": ["candidate_needs_review", "imported_unverified", "excluded"]}
+          "review_status": {"enum": ["candidate_needs_review", "imported_unverified", "excluded"]},
+          "source_kind": {"enum": ["official_site", "wikidata", "openstreetmap", "provider_import", "fuma_import", "luna_official_web"]},
+          "binding_status": {"enum": ["same_host", "entity_bound_external", "imported_unverified"]}
         }
       }
     },
@@ -94,7 +96,7 @@
       "additionalProperties": false,
       "required": ["formula_version", "it_subsidiary_score", "ses_sales_score", "contactability_score", "priority_score", "tier", "reasons"],
       "properties": {
-        "formula_version": {"const": "it-subsidiary-ses-v1"},
+        "formula_version": {"enum": ["it-subsidiary-ses-v1", "top10000-sales-priority-v1", "luna-official-evidence-v1"]},
         "it_subsidiary_score": {"type": "integer", "minimum": 0, "maximum": 65},
         "ses_sales_score": {"type": "integer", "minimum": 0, "maximum": 65},
         "contactability_score": {"type": "integer", "minimum": 0, "maximum": 30},
@@ -115,7 +117,7 @@
         "generated_at": {"type": "string", "format": "date-time"},
         "profile_schema_version": {"type": "integer", "minimum": 1},
         "progress_schema_version": {"type": "integer", "minimum": 1},
-        "algorithm_version": {"const": "it-subsidiary-ses-v1"},
+        "algorithm_version": {"enum": ["it-subsidiary-ses-v1", "top10000-sales-priority-v1", "luna-official-evidence-v1"]},
         "promotion_authorized": {"const": false}
       }
     }

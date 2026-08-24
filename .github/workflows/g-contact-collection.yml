@@ -289,6 +289,7 @@ jobs:
             --summary output/g_collection_summary.json
           python ses_priority_json.py export \
             --targets ../../collection/phone_targets_g37_41_prioritized.csv \
+            --manifest '../../batches/decrypted/**/manifest.csv' \
             --progress '../../batches/decrypted/**/progress.jsonl' \
             --schema schemas/it-subsidiary-ses-priority-v1.schema.json \
             --jsonl output/g_ses_priority_profiles.jsonl \

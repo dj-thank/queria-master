@@ -33,6 +33,7 @@ class GContactWorkflowContractTests(unittest.TestCase):
         self.assertIn("--progress", text)
         self.assertIn("--retry-missing-profile", text)
         self.assertIn("ses_priority_json.py export", text)
+        self.assertIn("--manifest '../../batches/decrypted/**/manifest.csv'", text)
         self.assertIn("it-subsidiary-ses-priority-v1.schema.json", text)
         self.assertIn("g_ses_priority_profiles.jsonl", text)
         self.assertIn("g_ses_priority_profiles.csv", text)

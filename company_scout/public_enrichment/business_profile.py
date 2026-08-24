@@ -8,6 +8,7 @@ corporate relationships or confirmed phone numbers.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -95,6 +96,37 @@ def now_iso() -> str:
 
 def clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def official_site_binding(value: Any) -> tuple[str, str, str]:
+    url = clean_text(value)
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        url = "https://" + url.lstrip("/")
+    parsed = urlparse(url)
+    return (
+        (parsed.hostname or "").lower().removeprefix("www."),
+        parsed.path.rstrip("/") or "/",
+        parsed.query,
+    )
+
+
+def target_binding_sha256(
+    *,
+    corporate_number: Any,
+    official_site_url: Any,
+    scope_label: Any,
+    dataset_generation: Any,
+    runtime_binding_status: Any,
+) -> str:
+    payload = {
+        "corporate_number": clean_text(corporate_number),
+        "official_site_binding": list(official_site_binding(official_site_url)),
+        "scope_label": clean_text(scope_label),
+        "dataset_generation": clean_text(dataset_generation),
+        "runtime_binding_status": clean_text(runtime_binding_status),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _excerpt(text: str, start: int, end: int, limit: int) -> str:
