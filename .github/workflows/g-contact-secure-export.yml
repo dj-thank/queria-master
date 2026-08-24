@@ -1,0 +1,108 @@
+name: G contact secure export
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Completed G contact workflow run containing g-contact-batch
+        required: true
+        type: string
+      recipient_public_key_b64:
+        description: Base64-encoded RSA public key (SubjectPublicKeyInfo PEM)
+        required: true
+        type: string
+
+permissions:
+  actions: read
+
+concurrency:
+  group: g-contact-secure-export-${{ inputs.source_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  reencrypt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Validate export request
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          RECIPIENT_PUBLIC_KEY_B64: ${{ inputs.recipient_public_key_b64 }}
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 ))
+          (( ${#RECIPIENT_PUBLIC_KEY_B64} >= 400 ))
+      - uses: actions/download-artifact@v4
+        with:
+          name: g-contact-batch
+          path: inbound
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+      - name: Decrypt internally and re-encrypt for the one-time recipient
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          RECIPIENT_PUBLIC_KEY_B64: ${{ inputs.recipient_public_key_b64 }}
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test -s inbound/g-contact-batch.tar.gz.enc
+          mkdir -p plaintext export
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -pass env:G_CONTACT_ARTIFACT_KEY \
+            -in inbound/g-contact-batch.tar.gz.enc |
+            tar -C plaintext -xzf -
+          test -s plaintext/g_contact_targets.csv
+          test -s plaintext/g_public_contacts.csv
+          test -s plaintext/g_collection_summary.json
+          FILE_COUNT="$(find plaintext -type f | wc -l)"
+          [[ "$FILE_COUNT" == "3" ]]
+
+          printf '%s' "$RECIPIENT_PUBLIC_KEY_B64" | base64 --decode > export/recipient-public.pem
+          openssl pkey -pubin -in export/recipient-public.pem -noout
+          openssl rand -base64 48 | tr -d '\n' > export/passphrase
+          tar -C plaintext -czf export/g-contact-export.tar.gz \
+            g_contact_targets.csv g_public_contacts.csv g_collection_summary.json
+          openssl enc -aes-256-cbc -pbkdf2 -salt \
+            -pass file:export/passphrase \
+            -in export/g-contact-export.tar.gz \
+            -out export/g-contact-export.tar.gz.enc
+          openssl pkeyutl -encrypt -pubin \
+            -inkey export/recipient-public.pem \
+            -pkeyopt rsa_padding_mode:oaep \
+            -pkeyopt rsa_oaep_md:sha256 \
+            -pkeyopt rsa_mgf1_md:sha256 \
+            -in export/passphrase \
+            -out export/g-contact-export-key.rsa
+
+          PAYLOAD_SHA256="$(sha256sum export/g-contact-export.tar.gz.enc | cut -d' ' -f1)"
+          KEY_SHA256="$(sha256sum export/g-contact-export-key.rsa | cut -d' ' -f1)"
+          cat > export/export_receipt.json <<EOF
+          {
+            "schema_version": 1,
+            "source_run_id": ${SOURCE_RUN_ID},
+            "export_workflow_head_sha": "${GITHUB_SHA}",
+            "cipher": "AES-256-CBC/PBKDF2 with RSA-OAEP-SHA256 wrapped passphrase",
+            "payload_sha256": "${PAYLOAD_SHA256}",
+            "wrapped_key_sha256": "${KEY_SHA256}",
+            "plaintext_uploaded": false
+          }
+          EOF
+
+          rm -rf plaintext inbound
+          rm -f export/passphrase export/recipient-public.pem export/g-contact-export.tar.gz
+          test -s export/g-contact-export.tar.gz.enc
+          test -s export/g-contact-export-key.rsa
+          test -s export/export_receipt.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g-contact-export-${{ inputs.source_run_id }}
+          path: |
+            export/g-contact-export.tar.gz.enc
+            export/g-contact-export-key.rsa
+            export/export_receipt.json
+          if-no-files-found: error
+          retention-days: 1
