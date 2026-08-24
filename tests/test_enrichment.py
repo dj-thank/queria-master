@@ -60,6 +60,13 @@ def _make_canonical(path: Path) -> list[tuple[object, ...]]:
                 ),
             ],
         )
+        con.execute(
+            "CREATE TABLE core.company_industries(corporate_number VARCHAR, jsic_major_code VARCHAR)"
+        )
+        con.executemany(
+            "INSERT INTO core.company_industries VALUES (?, ?)",
+            [("1234567890123", "G"), ("9876543210987", "E")],
+        )
         return [tuple(row) for row in con.execute("SELECT * FROM core.companies ORDER BY corporate_number").fetchall()]
     finally:
         con.close()
@@ -265,6 +272,19 @@ def test_companion_writer_lock_is_exclusive(tmp_path: Path) -> None:
             raise AssertionError("second writer unexpectedly acquired the lock")
     finally:
         first.release()
+
+
+def test_seed_can_limit_tasks_to_industry_major(tmp_path: Path) -> None:
+    canonical = tmp_path / "canonical.duckdb"
+    enrichment = tmp_path / "queria_enrichment.duckdb"
+    _make_canonical(canonical)
+
+    seeded = seed_enrichment(canonical, enrichment_path=enrichment, industry_major="g")
+
+    assert seeded["industry_major"] == "G"
+    assert seeded["companies"] == 1
+    assert seeded["states"] == 5
+    assert seeded["canonical_websites"] == 1
 
 
 def test_worker_marks_missing_url_without_guessing(tmp_path: Path, monkeypatch) -> None:

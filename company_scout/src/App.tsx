@@ -41,7 +41,7 @@ import type {
 const blankPlan: SearchPlan = {
   prefectures: [],
   cities: [],
-  industry_codes: [],
+  industry_codes: ["G"],
   industry_terms: [],
   company_kinds: [],
   keyword_any: [],
@@ -112,7 +112,7 @@ function compactNumber(value?: number | null) {
 
 function App() {
   const [view, setView] = useState<View>("search");
-  const [prompt, setPrompt] = useState("東京都のSaaS・受託開発会社で、従業員30〜300名、Webサイトあり");
+  const [prompt, setPrompt] = useState("全国の情報通信業G37〜G41から、公式サイトと電話番号のある会社");
   const [plan, setPlan] = useState<SearchPlan>(blankPlan);
   const [result, setResult] = useState<SearchResult | null>(null);
   const [page, setPage] = useState(1);
@@ -274,9 +274,19 @@ function App() {
     try {
       const value = await api.collectCompanyPhone(selected);
       if (value.phone) {
-        setSelected({ ...selected, phone: value.phone });
-        setResult((current) => current ? { ...current, rows: current.rows.map((row) => row.corporate_number === selected.corporate_number ? { ...row, phone: value.phone } : row) } : current);
-        setMessage(`公式サイトから電話番号 ${value.phone} を取得しました。`);
+        const best = value.candidates?.[0];
+        const patch = {
+          phone: value.phone,
+          phone_type: best?.phone_type ?? "unclassified",
+          phone_source_url: best?.source_url ?? value.source_url,
+          phone_confidence: best?.confidence ?? null,
+          phone_evidence_text: best?.evidence_text ?? null,
+          phone_observed_at: best?.observed_at ?? null,
+          phone_status: "official_site_candidate",
+        };
+        setSelected({ ...selected, ...patch });
+        setResult((current) => current ? { ...current, rows: current.rows.map((row) => row.corporate_number === selected.corporate_number ? { ...row, ...patch } : row) } : current);
+        setMessage(`公式サイトから電話番号 ${value.phone} を取得しました（候補${value.candidates?.length ?? 1}件）。`);
       } else {
         setMessage("公式サイトから電話番号を確認できませんでした。");
       }
@@ -434,7 +444,7 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark"><Building2 size={19} /></div>
-          <div><strong>CompanyMaster</strong><span>企業探索ワークベンチ</span></div>
+          <div><strong>CompanyMaster G</strong><span>情報通信業（37〜41）完全版</span></div>
         </div>
         <nav>
           <button className={view === "search" ? "active" : ""} onClick={() => setView("search")}><Search size={17} />検索</button>
@@ -498,7 +508,7 @@ function App() {
                 {fieldCategory === "industry" && <div className="condition-section">
                   <div className="condition-section-head"><strong>業種</strong><span>大きな分類から選択できます</span></div>
                   <div className="option-grid industry-options">
-                    {industryPresets.map((preset) => {
+                    {industryPresets.filter((preset) => preset.label === "情報通信業（G）").map((preset) => {
                       const active = preset.codes.every((code) => plan.industry_codes.includes(code)) && preset.terms.every((term) => plan.industry_terms.includes(term));
                       return <button key={preset.label} className={`option-pill ${active ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, industry_codes: active ? p.industry_codes.filter((code) => !preset.codes.includes(code)) : Array.from(new Set([...p.industry_codes, ...preset.codes])), industry_terms: active ? p.industry_terms.filter((term) => !preset.terms.includes(term)) : Array.from(new Set([...p.industry_terms, ...preset.terms])) }))}>{preset.label}</button>;
                     })}
@@ -507,7 +517,8 @@ function App() {
                   <div className="option-grid middle-options">
                     {industryMiddle.map((item) => <button key={item.code} className={`option-pill ${plan.industry_codes.includes(item.code) ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, industry_codes: toggleValue(p.industry_codes, item.code) }))}><b>{item.displayCode}</b>{item.label}</button>)}
                   </div>
-                  <div className="condition-input-row two"><label><span>業種コード（小分類・細分類も可）</span><input value={plan.industry_codes.filter((code) => !industryMiddle.some((item) => item.code === code)).join(", ")} onChange={(e) => setPlan((p) => ({ ...p, industry_codes: [...industryMiddle.map((item) => item.code).filter((code) => p.industry_codes.includes(code)), ...splitValues(e.target.value)] }))} placeholder="例: 391 / 3911" /></label><label><span>業種キーワード</span><input value={plan.industry_terms.join(", ")} onChange={(e) => setPlan((p) => ({ ...p, industry_terms: splitValues(e.target.value) }))} placeholder="SaaS、食品製造" /></label></div>
+                  <div className="condition-input-row two"><label><span>業種コード（小分類・細分類も可）</span><input value={plan.industry_codes.filter((code) => !industryMiddle.some((item) => item.code === code) && code !== "G").join(", ")} onChange={(e) => setPlan((p) => ({ ...p, industry_codes: ["G", ...industryMiddle.map((item) => item.code).filter((code) => p.industry_codes.includes(code)), ...splitValues(e.target.value)] }))} placeholder="例: 391 / G391 / 3911 / G3911" /></label><label><span>業種キーワード</span><input value={plan.industry_terms.join(", ")} onChange={(e) => setPlan((p) => ({ ...p, industry_terms: splitValues(e.target.value) }))} placeholder="SaaS、受託開発" /></label></div>
+                  <div className="taxonomy-note">G37〜G41の全小分類・細分類を公式JSICマスターから収録。`39`と`G39`、`391`と`G391`は同じ配下を検索します。企業件数0の分類もマスターには残しています。</div>
                 </div>}
 
                 {fieldCategory === "organization" && <div className="condition-section">
@@ -550,12 +561,12 @@ function App() {
             <div className="content-grid">
               <div className="table-card">
                 <div className="result-table" role="table">
-                  <div className="result-grid result-header" role="row"><span>会社</span><span>所在地</span><span>業種</span><span>従業員</span><span>資本金</span><span>電話</span><span>Web</span></div>
+                  <div className="result-grid result-header" role="row"><span>会社 / FUMA</span><span>所在地</span><span>業種</span><span>従業員</span><span>資本金</span><span>電話</span><span>Web</span></div>
                   {displayRows.length ? <div className="result-scroll" ref={listScrollRef} onScroll={(e) => setListScrollTop(e.currentTarget.scrollTop)}>
                     <div className="virtual-canvas" style={{ height: `${displayRows.length * virtualRowHeight}px` }}>
                       <div className="virtual-rows" style={{ transform: `translateY(${virtualStart * virtualRowHeight}px)` }}>
                         {virtualRows.map((company) => <div key={company.corporate_number} className={`result-grid result-row ${selected?.corporate_number === company.corporate_number ? "selected" : ""}`} role="row" onClick={() => setSelected(company)}>
-                          <span><strong>{company.name}</strong><small>{company.corporate_number}</small></span>
+                          <span><strong>{company.name}</strong><small>{company.corporate_number}{company.fuma_id ? ` ・ FUMA ${company.fuma_id}` : ""}</small></span>
                           <span>{[company.prefecture, company.city].filter(Boolean).join(" ") || "-"}</span>
                           <span><span>{company.industry_name || company.inferred_industry_name || "-"}</span>{company.inferred_industry_name && !company.industry_name && <small className="inferred">AI推定</small>}</span>
                           <span>{company.employees != null ? fmt.format(company.employees) : "-"}</span>
@@ -581,13 +592,20 @@ function App() {
                 {selected ? <>
                   <div className="inspector-head"><div><span className="kicker">企業詳細</span><h2>{selected.name}</h2></div>{selected.website && <button className="icon-btn" onClick={() => void openUrl(selected.website!)}><ExternalLink size={17} /></button>}</div>
                   <dl>
-                    <div><dt>法人番号</dt><dd>{selected.corporate_number}</dd></div>
+                    <div><dt>法人番号 / Entity Key</dt><dd>{selected.corporate_number}</dd></div>
+                    <div><dt>FUMA_ID</dt><dd>{selected.fuma_id || "-"}</dd></div>
+                    <div><dt>データソース</dt><dd>{selected.source_kind || "-"}</dd></div>
                     <div><dt>所在地</dt><dd>{selected.address || [selected.prefecture, selected.city].filter(Boolean).join(" ") || "-"}</dd></div>
-                    <div><dt>業種</dt><dd>{selected.industry_name || "-"}{selected.industry_code ? ` (${selected.industry_code})` : ""}</dd></div>
+                    <div><dt>中分類</dt><dd>{selected.industry_middle_name || "-"}{selected.industry_middle_code ? ` (${selected.industry_middle_code})` : ""}</dd></div>
+                    <div><dt>小分類</dt><dd>{selected.industry_small_name || "-"}{selected.industry_small_code ? ` (${selected.industry_small_code})` : ""}</dd></div>
+                    <div><dt>細分類</dt><dd>{selected.industry_detail_name || selected.industry_name || "-"}{selected.industry_detail_code ? ` (${selected.industry_detail_code})` : ""}</dd></div>
                     <div><dt>従業員</dt><dd>{selected.employees != null ? `${fmt.format(selected.employees)}名` : "-"}</dd></div>
                     <div><dt>資本金</dt><dd>{selected.capital != null ? `${fmt.format(selected.capital)}円` : "-"}</dd></div>
                     <div><dt>設立年</dt><dd>{selected.established_year ?? "-"}</dd></div>
                     <div><dt>電話</dt><dd>{selected.phone || "-"}</dd></div>
+                    <div><dt>電話用途</dt><dd>{selected.phone_type || "-"}</dd></div>
+                    <div><dt>電話根拠URL</dt><dd>{selected.phone_source_url ? <a href={selected.phone_source_url} onClick={(e) => { e.preventDefault(); void openUrl(selected.phone_source_url!); }}>{selected.phone_source_url}</a> : "-"}</dd></div>
+                    <div><dt>電話状態</dt><dd>{selected.phone_status || "-"}</dd></div>
                   </dl>
                   {selected.business_summary && <p className="summary">{selected.business_summary}</p>}
                   <button className="primary full" onClick={deepResearch} disabled={busy === "research" || !codex?.authenticated || !codex?.luna_available}>

@@ -1,0 +1,19 @@
+Queria G37-41 build reference audit (2026-08-21, Asia/Tokyo)
+
+Canonical implementation:
+main b16fb642f95bd36cd0efde2ee2b5167ea79d034b
+
+Reference-only branches/tags checked with git ls-remote:
+release/v0.9.0 73f9c010696d8a6c50c393045b388cfa64807d16
+v0.9.0 a71dd84060dbde9837bfa3738fd1d1a4be718617
+feat/jsic39-contact-collection 54883164d5edaf0d8c7cef680cd5e48cf750e310
+feat/public-enrichment-desktop 614d32840495fdbb6e11f9b2efe9ff01e4e3ff68
+hardening/public-enrichment-v1.1 2a12609e58ddffa4b60f339a25ddc10d68ccebb6
+feat/contact-dataset-packaging d8e8c6cc570fac7c6084b51e254b720d517cce16
+feat/verified-public-contacts-20260821 63ce3cc84b170275bcf5b6e9cde7b387970ea2e7
+docs/readme-current-20260821 944395aac48b6628ae3814428da5da15b403354f
+
+Decision:
+main is the integrated source of truth. The release/tag and feature branches
+were not mixed wholesale; only the main public-enrichment implementation was
+used as the base, with a G37-G41 wrapper added locally.

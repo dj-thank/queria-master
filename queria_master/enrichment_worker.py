@@ -59,6 +59,7 @@ def run_enrichment_worker(
     interval_seconds: float = 0.25,
     respect_robots: bool = True,
     user_agent: str = DEFAULT_USER_AGENT,
+    only_with_url: bool = False,
 ) -> dict[str, int]:
     """Process at most ``max_tasks`` tasks and return auditable counters."""
 
@@ -77,6 +78,7 @@ def run_enrichment_worker(
             source_key=source_key,
             batch_size=min(batch_size, remaining),
             lease_seconds=lease_seconds,
+            require_url=only_with_url,
         )
         if not claimed:
             break

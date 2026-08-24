@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
+from . import __version__
 from .resources import (
     ALL_PUBLIC_SCOPE,
     DEFAULT_CACHE,
@@ -42,7 +43,7 @@ class RefreshResult:
     artifact_paths: tuple[Path, ...] = ()
 
 
-PROJECT_VERSION = "0.7.0"
+PROJECT_VERSION = __version__
 
 
 def _utc_now() -> str:
