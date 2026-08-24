@@ -119,10 +119,8 @@ impl PublicEnrichmentManager {
         let db_path = workspace_dir
             .join("output")
             .join("company_public_data.sqlite3");
-        std::fs::create_dir_all(&input_dir)
-            .context("公開データ入力フォルダを作成できません")?;
-        std::fs::create_dir_all(&output_dir)
-            .context("公開データ出力フォルダを作成できません")?;
+        std::fs::create_dir_all(&input_dir).context("公開データ入力フォルダを作成できません")?;
+        std::fs::create_dir_all(&output_dir).context("公開データ出力フォルダを作成できません")?;
 
         let script_dir = discover_script_dir(&resource_dir);
         let python = discover_python();
@@ -149,7 +147,11 @@ impl PublicEnrichmentManager {
         let script_path = self.inner.script_dir.join(PUBLIC_SCRIPT);
         let available = script_path.is_file() && self.inner.python.is_some();
         let publish_available = self.inner.publisher.is_some()
-            && self.inner.canonical_db.as_ref().is_some_and(|path| path.is_file())
+            && self
+                .inner
+                .canonical_db
+                .as_ref()
+                .is_some_and(|path| path.is_file())
             && self.inner.enrichment_db.is_some()
             && self.inner.runtime_db.is_some()
             && self.inner.search_index.is_some();
@@ -167,7 +169,11 @@ impl PublicEnrichmentManager {
             input_dir: path_text(&self.inner.input_dir),
             output_dir: path_text(&self.inner.output_dir),
             canonical_db: self.inner.canonical_db.as_ref().map(|path| path_text(path)),
-            enrichment_db: self.inner.enrichment_db.as_ref().map(|path| path_text(path)),
+            enrichment_db: self
+                .inner
+                .enrichment_db
+                .as_ref()
+                .map(|path| path_text(path)),
             runtime_db: self.inner.runtime_db.as_ref().map(|path| path_text(path)),
             search_index: self.inner.search_index.as_ref().map(|path| path_text(path)),
             companies: 0,
@@ -261,8 +267,7 @@ impl PublicEnrichmentManager {
             return Err(anyhow!("分割件数は100〜100000の範囲で指定してください"));
         }
         if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent)
-                .context("出力先フォルダを作成できません")?;
+            std::fs::create_dir_all(parent).context("出力先フォルダを作成できません")?;
         }
         let args = vec![
             OsString::from("make-assignment"),
@@ -330,11 +335,7 @@ impl PublicEnrichmentManager {
         self.run_public_cli_unlocked(args, limit).await
     }
 
-    async fn run_public_cli_unlocked(
-        &self,
-        args: Vec<OsString>,
-        limit: Duration,
-    ) -> Result<Value> {
+    async fn run_public_cli_unlocked(&self, args: Vec<OsString>, limit: Duration) -> Result<Value> {
         let python = self
             .inner
             .python
@@ -379,21 +380,15 @@ impl PublicEnrichmentManager {
         }
         let start = stdout
             .find('{')
-            .ok_or_else(|| {
-                anyhow!("公開データ統合処理からJSONが返されませんでした")
-            })?;
+            .ok_or_else(|| anyhow!("公開データ統合処理からJSONが返されませんでした"))?;
         serde_json::from_str(stdout[start..].trim())
             .context("公開データ統合処理のJSONを解釈できません")
     }
 
     async fn run_publish_cli_unlocked(&self, limit: Duration) -> Result<Value> {
-        let runtime = self
-            .inner
-            .publisher
-            .clone()
-            .ok_or_else(|| {
-                anyhow!("Queria統合CLIが見つかりません。QUERIA_MASTER_CLIを設定してください")
-            })?;
+        let runtime = self.inner.publisher.clone().ok_or_else(|| {
+            anyhow!("Queria統合CLIが見つかりません。QUERIA_MASTER_CLIを設定してください")
+        })?;
         let canonical = self
             .inner
             .canonical_db
@@ -456,8 +451,7 @@ impl PublicEnrichmentManager {
         let start = stdout
             .find('{')
             .ok_or_else(|| anyhow!("Queria統合CLIからJSONが返されませんでした"))?;
-        serde_json::from_str(stdout[start..].trim())
-            .context("Queria統合CLIのJSONを解釈できません")
+        serde_json::from_str(stdout[start..].trim()).context("Queria統合CLIのJSONを解釈できません")
     }
 }
 
@@ -489,7 +483,10 @@ async fn bounded_output(
             read_bounded(stdout, total.clone(), overflow_message),
             read_bounded(stderr, total, overflow_message),
         )?;
-        let status = child.wait().await.context("subprocessの終了を待機できません")?;
+        let status = child
+            .wait()
+            .await
+            .context("subprocessの終了を待機できません")?;
         Ok(BoundedOutput {
             status,
             stdout,
@@ -573,8 +570,7 @@ fn discover_publisher(
         });
     }
     let project_root = script_dir.parent().and_then(Path::parent)?;
-    if project_root.join("queria_master").is_dir()
-        && project_root.join("pyproject.toml").is_file()
+    if project_root.join("queria_master").is_dir() && project_root.join("pyproject.toml").is_file()
     {
         let python = python?.clone();
         let mut prefix_args = python.prefix_args;
