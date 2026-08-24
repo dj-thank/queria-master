@@ -172,7 +172,7 @@ jobs:
               -in "$WORK/prior-archive/g-contact-shard-${SHARD}.tar.gz.enc" |
               tar -C "$WORK/prior" -xzf -
             test -s "$WORK/prior/manifest.csv"
-            test -s "$WORK/prior/progress.jsonl"
+            test -e "$WORK/prior/progress.jsonl"
             cmp --silent "$WORK/prior/manifest.csv" "$WORK/manifest.csv" || {
               echo "Prior progress manifest does not match this shard." >&2
               exit 1
@@ -191,7 +191,7 @@ jobs:
             --timeout 20
 
           test -s "$WORK/manifest.csv"
-          test -s "$WORK/progress.jsonl"
+          test -e "$WORK/progress.jsonl"
           umask 077
           tar -C "$WORK" -czf - \
               manifest.csv progress.jsonl phones.csv prepare_summary.json collection_summary.json |

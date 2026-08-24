@@ -104,19 +104,19 @@ def canonical_url(base: str, href: str) -> str:
     return urldefrag(urljoin(base, href))[0]
 
 
-def is_public_http_url(url: str) -> bool:
-    """Reject non-web schemes and destinations that can reach local/private networks."""
+def resolve_public_http_url(url: str) -> tuple[Any, tuple[str, ...]] | None:
+    """Resolve one URL once and return only a wholly public endpoint snapshot."""
     try:
         parsed = urlparse(url)
         if parsed.scheme.lower() not in {"http", "https"}:
-            return False
+            return None
         if parsed.username or parsed.password:
-            return False
+            return None
         host = (parsed.hostname or "").strip(".").lower()
         if not host or host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
-            return False
+            return None
         if parsed.port not in {None, 80, 443}:
-            return False
+            return None
         infos = socket.getaddrinfo(
             host,
             parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
@@ -124,10 +124,73 @@ def is_public_http_url(url: str) -> bool:
         )
         addresses = {info[4][0].split("%", 1)[0] for info in infos}
         if not addresses:
-            return False
-        return all(ipaddress.ip_address(address).is_global for address in addresses)
+            return None
+        parsed_addresses = [ipaddress.ip_address(address) for address in addresses]
+        if not all(address.is_global for address in parsed_addresses):
+            return None
+        ordered = tuple(str(address) for address in sorted(parsed_addresses, key=lambda item: (item.version, int(item))))
+        return parsed, ordered
     except (OSError, ValueError):
-        return False
+        return None
+
+
+def is_public_http_url(url: str) -> bool:
+    """Reject non-web schemes and destinations that can reach local/private networks."""
+    return resolve_public_http_url(url) is not None
+
+
+def original_host_header(url: str) -> str:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").encode("idna").decode("ascii")
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    return f"{host}:{parsed.port}" if parsed.port and parsed.port != default_port else host
+
+
+class PublicPinnedHTTPAdapter(requests.adapters.HTTPAdapter):
+    """Connect to the validated IP while retaining the original Host and TLS name."""
+
+    def get_connection_with_tls_context(
+        self,
+        request: requests.PreparedRequest,
+        verify: Any,
+        proxies: dict[str, str] | None = None,
+        cert: Any = None,
+    ) -> Any:
+        if requests.utils.select_proxy(request.url, proxies):
+            raise requests.exceptions.ProxyError("Proxies are disabled for the public-site crawler")
+        endpoint = resolve_public_http_url(request.url)
+        if endpoint is None:
+            raise requests.exceptions.InvalidURL("URL did not resolve exclusively to public addresses")
+        parsed, addresses = endpoint
+        host_params, pool_kwargs = self.build_connection_pool_key_attributes(request, verify, cert)
+        original_host = (parsed.hostname or "").encode("idna").decode("ascii")
+        host_params.update(
+            scheme=parsed.scheme.lower(),
+            host=addresses[0],
+            port=parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+        )
+        if parsed.scheme.lower() == "https":
+            pool_kwargs["server_hostname"] = original_host
+            pool_kwargs["assert_hostname"] = original_host
+        return self.poolmanager.connection_from_host(**host_params, pool_kwargs=pool_kwargs)
+
+    def send(self, request: requests.PreparedRequest, *args: Any, **kwargs: Any) -> requests.Response:
+        if requests.utils.select_proxy(request.url, kwargs.get("proxies")):
+            raise requests.exceptions.ProxyError("Proxies are disabled for the public-site crawler")
+        request.headers["Host"] = original_host_header(request.url)
+        return super().send(request, *args, **kwargs)
+
+
+def build_safe_session() -> requests.Session:
+    session = requests.Session()
+    session.trust_env = False
+    adapter = PublicPinnedHTTPAdapter(max_retries=0)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    session.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.7"})
+    return session
 
 
 def safe_get_text(
@@ -141,6 +204,11 @@ def safe_get_text(
     current = url
     for _ in range(MAX_REDIRECTS + 1):
         if not is_public_http_url(current) or not same_host(current, expected_host):
+            return None
+        try:
+            if not isinstance(session.get_adapter(current), PublicPinnedHTTPAdapter):
+                return None
+        except (AttributeError, requests.RequestException):
             return None
         try:
             response = session.get(current, timeout=timeout, allow_redirects=False, stream=True)
@@ -769,15 +837,15 @@ def main() -> int:
         choices=sorted(TERMINAL_STATES),
         help="指定状態だけを再試行する（複数指定可）",
     )
-    parser.add_argument("--trust-env", action="store_true", help="requestsのプロキシ環境変数を利用する")
+    parser.add_argument("--trust-env", action="store_true", help="互換用。SSRF防止のため指定時はfail closedする")
     args = parser.parse_args()
     if args.max_candidates < 1:
         parser.error("--max-candidates は1以上で指定してください")
 
     targets = load_targets(args.db, args.limit)
-    session = requests.Session()
-    session.trust_env = args.trust_env
-    session.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.7"})
+    if args.trust_env:
+        parser.error("--trust-env はSSRF防止の接続先IP固定と両立しないため使用できません")
+    session = build_safe_session()
     progress = args.progress or args.output.with_suffix(".progress.jsonl")
     if args.restart and progress.exists():
         progress.unlink()

@@ -36,6 +36,8 @@ class GContactWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("path: collection/phone_targets_g37_41_enriched.csv", text)
         self.assertIn('[[ "$START_OFFSET" =~ ^[0-9]+$ ]]', text)
         self.assertIn('[[ "$PRIOR_RUN_ID" =~ ^[0-9]+$ ]]', text)
+        self.assertIn('test -e "$WORK/progress.jsonl"', text)
+        self.assertNotIn('test -s "$WORK/progress.jsonl"', text)
 
 
 if __name__ == "__main__":

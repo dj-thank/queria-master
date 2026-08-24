@@ -6,7 +6,7 @@
 
 機械可読の集計、run ID、ローカル証拠bytesのサイズ・SHA-256、10,000行の状態内訳、再現性の限界は [`G_CONTACT_COLLECTION_20260824.json`](G_CONTACT_COLLECTION_20260824.json) に固定した。秘密・企業別データをGitへ出さずに、保持中のローカル証拠と照合できるreceiptである。
 
-各ホスト内は逐次処理し、robots.txt、HTTP(S)限定、public IP、同一ホスト、リダイレクト、最大ページ数、受信サイズ、タイムアウト、0.75秒間隔を適用した。対象manifestは予定、append-only progress JSONLだけを処理完了証拠とした。
+各ホスト内は逐次処理し、robots.txt、HTTP(S)限定、public IPへのDNS固定、proxy拒否、同一ホスト、リダイレクト、最大ページ数、受信サイズ、タイムアウト、0.75秒間隔を適用した。対象manifestは予定、append-only progress JSONLだけを処理完了証拠とした。
 
 ## 1,000社 pilot
 
