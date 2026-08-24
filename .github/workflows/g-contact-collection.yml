@@ -75,10 +75,24 @@ jobs:
             --database collection/queria_runtime_g_fuma.duckdb \
             --output collection/phone_targets_g37_41_enriched.csv \
             --require-complete
+      - name: Encrypt cross-job target artifact
+        env:
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 )) || {
+            echo "G_CONTACT_ARTIFACT_KEY must be configured with at least 32 characters." >&2
+            exit 1
+          }
+          umask 077
+          tar -C collection -czf - phone_targets_g37_41_enriched.csv |
+            openssl enc -aes-256-cbc -pbkdf2 -salt \
+              -pass env:G_CONTACT_ARTIFACT_KEY \
+              -out collection/g-contact-targets.tar.gz.enc
       - uses: actions/upload-artifact@v4
         with:
           name: g-contact-targets
-          path: collection/phone_targets_g37_41_enriched.csv
+          path: collection/g-contact-targets.tar.gz.enc
           if-no-files-found: error
           retention-days: 90
 
@@ -102,13 +116,27 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: g-contact-targets
-          path: collection
+          path: collection-archive
+      - name: Decrypt target artifact
+        env:
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 ))
+          umask 077
+          mkdir -p collection
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -pass env:G_CONTACT_ARTIFACT_KEY \
+            -in collection-archive/g-contact-targets.tar.gz.enc |
+            tar -C collection -xzf -
+          test -s collection/phone_targets_g37_41_enriched.csv
       - name: Prepare shard, restore matching progress, and crawl
         shell: bash
         working-directory: company_scout/public_enrichment
         env:
           GH_TOKEN: ${{ github.token }}
           SHARD: ${{ matrix.shard }}
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
         run: |
           set -euo pipefail
           [[ "$START_OFFSET" =~ ^[0-9]+$ ]]
@@ -134,11 +162,15 @@ jobs:
             --limit "$BATCH_SIZE"
 
           if [[ -n "$PRIOR_RUN_ID" ]]; then
-            mkdir -p "$WORK/prior"
+            mkdir -p "$WORK/prior-archive" "$WORK/prior"
             gh run download "$PRIOR_RUN_ID" \
               --repo "$GITHUB_REPOSITORY" \
               --name "g-contact-shard-${SHARD}" \
-              --dir "$WORK/prior"
+              --dir "$WORK/prior-archive"
+            openssl enc -d -aes-256-cbc -pbkdf2 \
+              -pass env:G_CONTACT_ARTIFACT_KEY \
+              -in "$WORK/prior-archive/g-contact-shard-${SHARD}.tar.gz.enc" |
+              tar -C "$WORK/prior" -xzf -
             test -s "$WORK/prior/manifest.csv"
             test -s "$WORK/prior/progress.jsonl"
             cmp --silent "$WORK/prior/manifest.csv" "$WORK/manifest.csv" || {
@@ -157,15 +189,19 @@ jobs:
             --max-candidates 5 \
             --sleep 0.75 \
             --timeout 20
+
+          test -s "$WORK/manifest.csv"
+          test -s "$WORK/progress.jsonl"
+          umask 077
+          tar -C "$WORK" -czf - \
+              manifest.csv progress.jsonl phones.csv prepare_summary.json collection_summary.json |
+            openssl enc -aes-256-cbc -pbkdf2 -salt \
+              -pass env:G_CONTACT_ARTIFACT_KEY \
+              -out "$WORK/g-contact-shard-${SHARD}.tar.gz.enc"
       - uses: actions/upload-artifact@v4
         with:
           name: g-contact-shard-${{ matrix.shard }}
-          path: |
-            company_scout/public_enrichment/work/shard-${{ matrix.shard }}/manifest.csv
-            company_scout/public_enrichment/work/shard-${{ matrix.shard }}/progress.jsonl
-            company_scout/public_enrichment/work/shard-${{ matrix.shard }}/phones.csv
-            company_scout/public_enrichment/work/shard-${{ matrix.shard }}/prepare_summary.json
-            company_scout/public_enrichment/work/shard-${{ matrix.shard }}/collection_summary.json
+          path: company_scout/public_enrichment/work/shard-${{ matrix.shard }}/g-contact-shard-${{ matrix.shard }}.tar.gz.enc
           if-no-files-found: error
           retention-days: 90
 
@@ -181,7 +217,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: g-contact-targets
-          path: collection
+          path: collection-archive
       - uses: actions/download-artifact@v4
         with:
           pattern: g-contact-shard-*
@@ -189,23 +225,49 @@ jobs:
       - name: Merge only completed per-company progress
         shell: bash
         working-directory: company_scout/public_enrichment
+        env:
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
         run: |
           set -euo pipefail
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 ))
+          umask 077
+          mkdir -p ../../collection ../../batches/decrypted
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -pass env:G_CONTACT_ARTIFACT_KEY \
+            -in ../../collection-archive/g-contact-targets.tar.gz.enc |
+            tar -C ../../collection -xzf -
+          mapfile -t SHARD_ARCHIVES < <(find ../../batches -type f -name 'g-contact-shard-*.tar.gz.enc' | sort)
+          (( ${#SHARD_ARCHIVES[@]} == 8 )) || {
+            echo "Expected 8 encrypted shard artifacts." >&2
+            exit 1
+          }
+          for archive in "${SHARD_ARCHIVES[@]}"; do
+            shard_name="$(basename "$archive" .tar.gz.enc)"
+            shard_dir="../../batches/decrypted/$shard_name"
+            mkdir -p "$shard_dir"
+            openssl enc -d -aes-256-cbc -pbkdf2 \
+              -pass env:G_CONTACT_ARTIFACT_KEY -in "$archive" |
+              tar -C "$shard_dir" -xzf -
+          done
           mkdir -p output
           python export_g_contact_targets.py \
             --targets ../../collection/phone_targets_g37_41_enriched.csv \
             --output output/g_contact_targets.csv
           python jsic39_collection.py merge \
             --all-companies output/g_contact_targets.csv \
-            --manifest '../../batches/**/manifest.csv' \
-            --phones '../../batches/**/phones.csv' \
-            --progress '../../batches/**/progress.jsonl' \
+            --manifest '../../batches/decrypted/**/manifest.csv' \
+            --phones '../../batches/decrypted/**/phones.csv' \
+            --progress '../../batches/decrypted/**/progress.jsonl' \
             --scope-label G37-G41 \
             --output output/g_public_contacts.csv \
             --summary output/g_collection_summary.json
+          tar -C output -czf - g_contact_targets.csv g_public_contacts.csv g_collection_summary.json |
+            openssl enc -aes-256-cbc -pbkdf2 -salt \
+              -pass env:G_CONTACT_ARTIFACT_KEY \
+              -out output/g-contact-batch.tar.gz.enc
       - uses: actions/upload-artifact@v4
         with:
           name: g-contact-batch
-          path: company_scout/public_enrichment/output/*
+          path: company_scout/public_enrichment/output/g-contact-batch.tar.gz.enc
           if-no-files-found: error
           retention-days: 90

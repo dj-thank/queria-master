@@ -335,7 +335,7 @@ class Jsic39CollectionTest(unittest.TestCase):
                 "corporate_number": "1000000000001",
                 "official_site_url": "https://alpha.example/",
                 "dataset_generation": "stale-generation",
-                "state": "no_phone_found",
+                "state": "processed_no_phone",
                 "candidates": [],
                 "completed_at": "2026-08-24T00:00:00Z",
             }) + "\n",
@@ -343,6 +343,60 @@ class Jsic39CollectionTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "dataset_generation mismatch"):
+            module.merge_batches(
+                all_companies_csv=self.companies,
+                manifests=[str(manifest)],
+                phone_files=[],
+                progress_files=[str(progress)],
+                output=self.root / "output.csv",
+                summary=self.root / "summary.json",
+            )
+
+    def test_merge_rejects_nonterminal_progress_state(self) -> None:
+        manifest = self.root / "manifest.csv"
+        self.write_manifest(manifest, "1000000000001")
+        progress = self.root / "progress.jsonl"
+        progress.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "corporate_number": "1000000000001",
+                "official_site_url": "https://alpha.example/",
+                "state": "started",
+                "candidates": [],
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "invalid corporate_number/state"):
+            module.merge_batches(
+                all_companies_csv=self.companies,
+                manifests=[str(manifest)],
+                phone_files=[],
+                progress_files=[str(progress)],
+                output=self.root / "output.csv",
+                summary=self.root / "summary.json",
+            )
+
+    def test_merge_rejects_invalid_progress_phone(self) -> None:
+        manifest = self.root / "manifest.csv"
+        self.write_manifest(manifest, "1000000000001")
+        progress = self.root / "progress.jsonl"
+        progress.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "corporate_number": "1000000000001",
+                "official_site_url": "https://alpha.example/",
+                "state": "phone_candidate_found",
+                "candidates": [{
+                    "phone": "1",
+                    "candidate_type": "代表電話",
+                    "url": "https://alpha.example/company",
+                }],
+            }, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "phone candidate is invalid"):
             module.merge_batches(
                 all_companies_csv=self.companies,
                 manifests=[str(manifest)],

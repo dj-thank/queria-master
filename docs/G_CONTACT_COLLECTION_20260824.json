@@ -7,7 +7,8 @@
     "company_rows_committed": false,
     "candidate_rows_committed": false,
     "progress_rows_committed": false,
-    "publication_authorized": false
+    "publication_authorized": false,
+    "workflow_artifact_protection": "AES-256-CBC with PBKDF2; repository secret G_CONTACT_ARTIFACT_KEY required; plaintext data artifacts are not uploaded"
   },
   "local_snapshot": {
     "dataset_generation": "g-v0.10.0-fuma-481b264b0cd2",
@@ -117,6 +118,7 @@
     "The local snapshot and public Release use different dataset generations and their counts must not be combined.",
     "Private company, candidate, and progress bytes are intentionally absent from Git; hashes identify retained local evidence but do not make the receipt independently reproducible from this repository alone.",
     "Phone values remain candidates until human review; no false-identification rate has been established.",
-    "Website discovery for missing-site rows has not been run."
+    "Website discovery for missing-site rows has not been run.",
+    "Changing G_CONTACT_ARTIFACT_KEY makes artifacts from earlier workflow runs unavailable for resume."
   ]
 }

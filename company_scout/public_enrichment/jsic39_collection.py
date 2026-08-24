@@ -26,6 +26,13 @@ PHONE_TYPE_PRIORITY = {
     "未分類": 8,
     "FAX": 9,
 }
+TERMINAL_PROGRESS_STATES = {
+    "phone_candidate_found",
+    "fax_only",
+    "processed_no_phone",
+    "blocked_by_policy",
+    "needs_review",
+}
 
 
 def clean(value: Any) -> str:
@@ -39,6 +46,12 @@ def as_int(value: Any) -> int:
         return int(text) if text else 0
     except ValueError:
         return 0
+
+
+def normalize_progress_phone(value: Any) -> str:
+    text = clean(value).replace("+81", "0")
+    digits = re.sub(r"\D", "", text)
+    return digits if 10 <= len(digits) <= 11 and digits.startswith("0") else ""
 
 
 def normalize_url(value: Any) -> str:
@@ -257,8 +270,8 @@ def _read_progress_jsonl(patterns: list[str]) -> tuple[dict[str, dict[str, Any]]
                     raise ValueError(f"Invalid progress JSONL: {path}:{line_number}") from exc
                 corporate_number = clean(record.get("corporate_number"))
                 state = clean(record.get("state"))
-                if not corporate_number or not state:
-                    raise ValueError(f"Progress record lacks corporate_number/state: {path}:{line_number}")
+                if not corporate_number or state not in TERMINAL_PROGRESS_STATES:
+                    raise ValueError(f"Progress record has invalid corporate_number/state: {path}:{line_number}")
                 latest[corporate_number] = record
     return latest, paths
 
@@ -348,10 +361,25 @@ def merge_batches(
         ):
             if clean(record.get(progress_field)) != clean(manifest_row.get(manifest_field)):
                 raise ValueError(f"Progress {progress_field} mismatch: {corporate_number}")
+        candidates = record.get("candidates") or []
+        if not isinstance(candidates, list) or any(not isinstance(candidate, dict) for candidate in candidates):
+            raise ValueError(f"Progress candidates are invalid: {corporate_number}")
         target_host = url_binding(manifest_row.get("公式サイトURL"))[0]
-        for candidate in record.get("candidates") or []:
+        for candidate in candidates:
             if url_binding(candidate.get("url"))[0] != target_host:
                 raise ValueError(f"Progress candidate host mismatch: {corporate_number}")
+            if not normalize_progress_phone(candidate.get("phone")):
+                raise ValueError(f"Progress phone candidate is invalid: {corporate_number}")
+            if clean(candidate.get("candidate_type")) not in PHONE_TYPE_PRIORITY:
+                raise ValueError(f"Progress candidate type is invalid: {corporate_number}")
+        state = clean(record.get("state"))
+        voice_candidates = [candidate for candidate in candidates if clean(candidate.get("candidate_type")) != "FAX"]
+        if state == "phone_candidate_found" and not voice_candidates:
+            raise ValueError(f"Progress state/candidates mismatch: {corporate_number}")
+        if state == "fax_only" and (not candidates or voice_candidates):
+            raise ValueError(f"Progress state/candidates mismatch: {corporate_number}")
+        if state in {"processed_no_phone", "blocked_by_policy", "needs_review"} and candidates:
+            raise ValueError(f"Progress state/candidates mismatch: {corporate_number}")
     processed = set(progress_by_company) if progress_paths else set(targeted)
 
     candidates_by_company: dict[str, dict[str, dict[str, str]]] = {}
@@ -376,9 +404,7 @@ def merge_batches(
     # and CSV export cannot lose successful evidence.
     for corporate_number, progress_record in progress_by_company.items():
         for rank, candidate in enumerate(progress_record.get("candidates") or [], start=1):
-            phone_digits = re.sub(r"\D", "", clean(candidate.get("phone")))
-            if not phone_digits:
-                continue
+            phone_digits = normalize_progress_phone(candidate.get("phone"))
             row = {
                 "法人番号": corporate_number,
                 "候補順位": str(rank),

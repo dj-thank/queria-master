@@ -27,6 +27,13 @@ class GContactWorkflowContractTests(unittest.TestCase):
         self.assertIn("--scope-label G37-G41", text)
         self.assertNotIn("--legacy-manifest-completion", text)
         self.assertIn("retention-days: 90", text)
+        self.assertIn("secrets.G_CONTACT_ARTIFACT_KEY", text)
+        self.assertIn("openssl enc -aes-256-cbc -pbkdf2 -salt", text)
+        self.assertIn("openssl enc -d -aes-256-cbc -pbkdf2", text)
+        self.assertIn("g-contact-targets.tar.gz.enc", text)
+        self.assertIn("g-contact-batch.tar.gz.enc", text)
+        self.assertNotIn("path: company_scout/public_enrichment/output/*", text)
+        self.assertNotIn("path: collection/phone_targets_g37_41_enriched.csv", text)
         self.assertIn('[[ "$START_OFFSET" =~ ^[0-9]+$ ]]', text)
         self.assertIn('[[ "$PRIOR_RUN_ID" =~ ^[0-9]+$ ]]', text)
 
