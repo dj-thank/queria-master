@@ -7,6 +7,7 @@ import argparse
 import csv
 import html
 import ipaddress
+import os
 import socket
 import json
 import re
@@ -175,7 +176,11 @@ def safe_get_text(
     return None
 
 
-def build_robot(session: requests.Session, base_url: str, timeout: float) -> RobotFileParser:
+def load_robot_policy(
+    session: requests.Session,
+    base_url: str,
+    timeout: float,
+) -> tuple[RobotFileParser, str | None]:
     parsed = urlparse(base_url)
     host = (parsed.hostname or "").lower()
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
@@ -190,7 +195,7 @@ def build_robot(session: requests.Session, base_url: str, timeout: float) -> Rob
     )
     if result is None:
         parser.parse(["User-agent: *", "Disallow: /"])
-        return parser
+        return parser, "robots_unavailable"
     _url, status, _headers, text = result
     if status == 200:
         parser.parse(text.splitlines())
@@ -198,6 +203,12 @@ def build_robot(session: requests.Session, base_url: str, timeout: float) -> Rob
         parser.parse([])
     else:
         parser.parse(["User-agent: *", "Disallow: /"])
+        return parser, f"robots_http_{status}"
+    return parser, None
+
+
+def build_robot(session: requests.Session, base_url: str, timeout: float) -> RobotFileParser:
+    parser, _reason = load_robot_policy(session, base_url, timeout)
     return parser
 
 
@@ -310,29 +321,34 @@ def extract_candidates(url: str, content: str) -> tuple[list[dict[str, Any]], li
     return list(candidates_by_phone.values()), parser.links
 
 
-def discover_candidates_for_site(
+def _crawl_site(
     session: requests.Session,
     website: str,
     max_pages: int,
     timeout: float,
     sleep_s: float,
-) -> list[dict[str, Any]]:
+    robot: RobotFileParser | None = None,
+) -> dict[str, Any]:
     if not re.match(r"^https?://", website, re.I):
         website = "https://" + website.lstrip("/")
     parsed = urlparse(website)
     host = (parsed.hostname or "").lower()
     if not host or not is_public_http_url(website):
-        return []
-    robot = build_robot(session, website, timeout)
+        return {"candidates": [], "pages_fetched": 0, "fetch_failures": 0, "policy_skips": 1}
+    robot = robot or build_robot(session, website, timeout)
     queue = [website]
     visited: set[str] = set()
     candidates_by_phone: dict[str, dict[str, Any]] = {}
+    pages_fetched = 0
+    fetch_failures = 0
+    policy_skips = 0
     while queue and len(visited) < max_pages:
         url = queue.pop(0)
         if url in visited or not same_host(url, host):
             continue
         visited.add(url)
         if not robot.can_fetch(USER_AGENT, url):
+            policy_skips += 1
             continue
         result = safe_get_text(
             session,
@@ -342,11 +358,14 @@ def discover_candidates_for_site(
             max_bytes=MAX_HTML_BYTES,
         )
         if result is None:
+            fetch_failures += 1
             continue
         final_url, status, headers, text = result
         content_type = headers.get("Content-Type") or headers.get("content-type") or ""
         if status != 200 or "text/html" not in content_type.lower():
+            fetch_failures += 1
             continue
+        pages_fetched += 1
         candidates, links = extract_candidates(final_url, text)
         for candidate in candidates:
             phone = str(candidate["phone"])
@@ -366,7 +385,23 @@ def discover_candidates_for_site(
             if candidate_url not in queue:
                 queue.append(candidate_url)
         time.sleep(max(0.0, sleep_s))
-    return sorted(candidates_by_phone.values(), key=candidate_sort_key, reverse=True)
+    return {
+        "candidates": sorted(candidates_by_phone.values(), key=candidate_sort_key, reverse=True),
+        "pages_fetched": pages_fetched,
+        "fetch_failures": fetch_failures,
+        "policy_skips": policy_skips,
+    }
+
+
+def discover_candidates_for_site(
+    session: requests.Session,
+    website: str,
+    max_pages: int,
+    timeout: float,
+    sleep_s: float,
+    robot: RobotFileParser | None = None,
+) -> list[dict[str, Any]]:
+    return list(_crawl_site(session, website, max_pages, timeout, sleep_s, robot=robot)["candidates"])
 
 
 def discover_for_site(
@@ -393,6 +428,258 @@ def load_targets(db: Path, limit: int) -> list[sqlite3.Row]:
     return rows[:limit] if limit > 0 else rows
 
 
+OUTPUT_FIELDS = [
+    "SOURCE_ID",
+    "企業名",
+    "法人番号",
+    "公式サイトURL",
+    "候補順位",
+    "電話番号",
+    "電話種別候補",
+    "根拠URL",
+    "根拠テキスト",
+    "抽出方法",
+    "信頼度",
+    "取得日時",
+]
+TERMINAL_STATES = {
+    "phone_candidate_found",
+    "processed_no_phone",
+    "blocked_by_policy",
+    "needs_review",
+}
+
+
+def _row_value(row: Any, key: str) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def load_progress(path: Path) -> tuple[dict[str, dict[str, Any]], int]:
+    """Load the latest record per company, tolerating one truncated tail line."""
+    if not path.is_file():
+        return {}, 0
+    lines = path.read_text(encoding="utf-8").splitlines()
+    latest: dict[str, dict[str, Any]] = {}
+    ignored_tail_lines = 0
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            if index == len(lines) - 1:
+                ignored_tail_lines += 1
+                continue
+            raise ValueError(f"Invalid progress JSONL at {path}:{index + 1}")
+        corporate_number = str(record.get("corporate_number") or "").strip()
+        state = str(record.get("state") or "").strip()
+        if not corporate_number or state not in TERMINAL_STATES:
+            raise ValueError(f"Invalid progress record at {path}:{index + 1}")
+        latest[corporate_number] = record
+    return latest, ignored_tail_lines
+
+
+def append_progress(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def write_candidate_output(
+    output: Path,
+    targets: list[Any],
+    progress_by_company: dict[str, dict[str, Any]],
+) -> int:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with output.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS)
+        writer.writeheader()
+        for row in targets:
+            corporate_number = str(_row_value(row, "corporate_number") or "").strip()
+            record = progress_by_company.get(corporate_number) or {}
+            candidates = list(record.get("candidates") or [])
+            for rank, candidate in enumerate(candidates, start=1):
+                writer.writerow(
+                    {
+                        "SOURCE_ID": _row_value(row, "source_id"),
+                        "企業名": _row_value(row, "company_name"),
+                        "法人番号": corporate_number,
+                        "公式サイトURL": _row_value(row, "website_url"),
+                        "候補順位": rank,
+                        "電話番号": candidate.get("phone"),
+                        "電話種別候補": candidate.get("candidate_type"),
+                        "根拠URL": candidate.get("url"),
+                        "根拠テキスト": candidate.get("context"),
+                        "抽出方法": candidate.get("source"),
+                        "信頼度": f"{float(candidate.get('score') or 0):.2f}",
+                        "取得日時": record.get("completed_at"),
+                    }
+                )
+                written += 1
+    return written
+
+
+def discover_site_result(
+    session: requests.Session,
+    website: str,
+    max_pages: int,
+    timeout: float,
+    sleep_s: float,
+) -> dict[str, Any]:
+    if not re.match(r"^https?://", website, re.I):
+        website = "https://" + website.lstrip("/")
+    parsed = urlparse(website)
+    host = (parsed.hostname or "").lower()
+    if not host or not is_public_http_url(website):
+        return {
+            "state": "blocked_by_policy",
+            "pages_fetched": 0,
+            "reason": "unsafe_or_unresolvable_url",
+            "candidates": [],
+        }
+    robot, policy_reason = load_robot_policy(session, website, timeout)
+    if policy_reason:
+        return {
+            "state": "needs_review",
+            "pages_fetched": 0,
+            "reason": policy_reason,
+            "candidates": [],
+        }
+    if not robot.can_fetch(USER_AGENT, website):
+        return {
+            "state": "blocked_by_policy",
+            "pages_fetched": 0,
+            "reason": "robots_disallow",
+            "candidates": [],
+        }
+    crawl = _crawl_site(
+        session,
+        website,
+        max_pages,
+        timeout,
+        sleep_s,
+        robot=robot,
+    )
+    candidates = list(crawl["candidates"])
+    pages_fetched = int(crawl["pages_fetched"])
+    if candidates:
+        state = "phone_candidate_found"
+        reason = None
+    elif pages_fetched:
+        state = "processed_no_phone"
+        reason = None
+    elif int(crawl["policy_skips"]):
+        state = "blocked_by_policy"
+        reason = "robots_disallow"
+    else:
+        state = "needs_review"
+        reason = "fetch_failed"
+    return {
+        "state": state,
+        "pages_fetched": pages_fetched,
+        "reason": reason,
+        "candidates": candidates,
+    }
+
+
+def collect_targets(
+    targets: list[Any],
+    *,
+    session: Any,
+    output: Path,
+    progress: Path,
+    max_pages: int,
+    max_candidates: int,
+    timeout: float,
+    sleep_s: float,
+    resume: bool,
+    retry_states: set[str] | None = None,
+    discoverer: Any = discover_site_result,
+) -> dict[str, Any]:
+    retry_states = set(retry_states or ())
+    unsupported_retry_states = retry_states.difference(TERMINAL_STATES)
+    if unsupported_retry_states:
+        raise ValueError(f"Unsupported retry states: {sorted(unsupported_retry_states)}")
+    progress_by_company, ignored_tail_lines = load_progress(progress) if resume else ({}, 0)
+    target_numbers = {
+        str(_row_value(row, "corporate_number") or "").strip()
+        for row in targets
+        if str(_row_value(row, "corporate_number") or "").strip()
+    }
+    already_completed = sum(
+        1
+        for number in target_numbers
+        if number in progress_by_company and progress_by_company[number]["state"] not in retry_states
+    )
+    attempted = 0
+    retried = 0
+    for row in targets:
+        corporate_number = str(_row_value(row, "corporate_number") or "").strip()
+        existing = progress_by_company.get(corporate_number)
+        if not corporate_number or (resume and existing and existing["state"] not in retry_states):
+            continue
+        if existing:
+            retried += 1
+        result = discoverer(
+            session,
+            str(_row_value(row, "website_url") or ""),
+            max_pages,
+            timeout,
+            sleep_s,
+        )
+        state = str(result.get("state") or "").strip()
+        if state not in TERMINAL_STATES:
+            raise ValueError(f"Unsupported collection state: {state}")
+        candidates = sorted(
+            list(result.get("candidates") or []),
+            key=candidate_sort_key,
+            reverse=True,
+        )[:max_candidates]
+        record = {
+            "schema_version": 1,
+            "source_id": _row_value(row, "source_id"),
+            "company_name": _row_value(row, "company_name"),
+            "corporate_number": corporate_number,
+            "official_site_url": _row_value(row, "website_url"),
+            "state": state,
+            "pages_fetched": result.get("pages_fetched"),
+            "reason": result.get("reason"),
+            "candidates": candidates,
+            "completed_at": now_iso(),
+        }
+        append_progress(progress, record)
+        progress_by_company[corporate_number] = record
+        attempted += 1
+
+    candidates_written = write_candidate_output(output, targets, progress_by_company)
+    state_counts: dict[str, int] = {}
+    for corporate_number in target_numbers:
+        record = progress_by_company.get(corporate_number)
+        if not record:
+            continue
+        state = str(record["state"])
+        state_counts[state] = state_counts.get(state, 0) + 1
+    return {
+        "targets": len(target_numbers),
+        "already_completed": already_completed,
+        "attempted_this_run": attempted,
+        "retried_this_run": retried,
+        "completed_total": sum(state_counts.values()),
+        "states": state_counts,
+        "companies_with_candidates": state_counts.get("phone_candidate_found", 0),
+        "phone_candidates_written": candidates_written,
+        "ignored_truncated_tail_lines": ignored_tail_lines,
+        "output": str(output),
+        "progress": str(progress),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="公式サイトから電話番号候補を取得")
     parser.add_argument("--db", type=Path, default=Path("output/company_public_data.sqlite3"))
@@ -402,6 +689,16 @@ def main() -> int:
     parser.add_argument("--sleep", type=float, default=1.0)
     parser.add_argument("--timeout", type=float, default=20)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--progress", type=Path, help="再開用のappend-only JSONL")
+    parser.add_argument("--summary", type=Path, help="今回と累積の件数JSON")
+    parser.add_argument("--restart", action="store_true", help="指定progressを破棄して最初から処理する")
+    parser.add_argument(
+        "--retry-state",
+        action="append",
+        default=[],
+        choices=sorted(TERMINAL_STATES),
+        help="指定状態だけを再試行する（複数指定可）",
+    )
     parser.add_argument("--trust-env", action="store_true", help="requestsのプロキシ環境変数を利用する")
     args = parser.parse_args()
     if args.max_candidates < 1:
@@ -411,66 +708,25 @@ def main() -> int:
     session = requests.Session()
     session.trust_env = args.trust_env
     session.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.7"})
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    fields = [
-        "SOURCE_ID",
-        "企業名",
-        "法人番号",
-        "公式サイトURL",
-        "候補順位",
-        "電話番号",
-        "電話種別候補",
-        "根拠URL",
-        "根拠テキスト",
-        "抽出方法",
-        "信頼度",
-        "取得日時",
-    ]
-    companies_found = 0
-    candidates_written = 0
-    with args.output.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        for row in targets:
-            candidates = discover_candidates_for_site(
-                session,
-                row["website_url"],
-                args.max_pages,
-                args.timeout,
-                args.sleep,
-            )
-            if candidates:
-                companies_found += 1
-            for rank, candidate in enumerate(candidates[: args.max_candidates], start=1):
-                writer.writerow(
-                    {
-                        "SOURCE_ID": row["source_id"],
-                        "企業名": row["company_name"],
-                        "法人番号": row["corporate_number"],
-                        "公式サイトURL": row["website_url"],
-                        "候補順位": rank,
-                        "電話番号": candidate["phone"],
-                        "電話種別候補": candidate["candidate_type"],
-                        "根拠URL": candidate["url"],
-                        "根拠テキスト": candidate["context"],
-                        "抽出方法": candidate["source"],
-                        "信頼度": f"{candidate['score']:.2f}",
-                        "取得日時": now_iso(),
-                    }
-                )
-                candidates_written += 1
-    print(
-        json.dumps(
-            {
-                "targets": len(targets),
-                "companies_with_candidates": companies_found,
-                "phone_candidates_written": candidates_written,
-                "output": str(args.output),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+    progress = args.progress or args.output.with_suffix(".progress.jsonl")
+    if args.restart and progress.exists():
+        progress.unlink()
+    result = collect_targets(
+        targets,
+        session=session,
+        output=args.output,
+        progress=progress,
+        max_pages=args.max_pages,
+        max_candidates=args.max_candidates,
+        timeout=args.timeout,
+        sleep_s=args.sleep,
+        resume=True,
+        retry_states=set(args.retry_state),
     )
+    if args.summary:
+        args.summary.parent.mkdir(parents=True, exist_ok=True)
+        args.summary.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 

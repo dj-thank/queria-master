@@ -55,6 +55,61 @@ class PhoneSecurityTests(unittest.TestCase):
         self.assertEqual(candidates[0]["source"], "text")
         self.assertIn("代表電話", candidates[0]["context"])
 
+    def test_explicit_robots_denial_is_not_reported_as_processed_no_phone(self) -> None:
+        def fake_get(_session, url: str, **_kwargs):
+            if url.endswith("/robots.txt"):
+                return url, 200, {"Content-Type": "text/plain"}, "User-agent: *\nDisallow: /"
+            raise AssertionError("a denied site must not be fetched")
+
+        with patch.object(phone, "is_public_http_url", return_value=True), patch.object(
+            phone, "safe_get_text", side_effect=fake_get
+        ):
+            result = phone.discover_site_result(object(), "https://example.com/", 4, 20, 0)
+
+        self.assertEqual(result["state"], "blocked_by_policy")
+        self.assertEqual(result["reason"], "robots_disallow")
+        self.assertEqual(result["pages_fetched"], 0)
+
+    def test_unavailable_robots_policy_requires_review_instead_of_crawling(self) -> None:
+        with patch.object(phone, "is_public_http_url", return_value=True), patch.object(
+            phone, "safe_get_text", return_value=None
+        ):
+            result = phone.discover_site_result(object(), "https://example.com/", 4, 20, 0)
+
+        self.assertEqual(result["state"], "needs_review")
+        self.assertEqual(result["reason"], "robots_unavailable")
+        self.assertEqual(result["pages_fetched"], 0)
+
+    def test_failed_page_fetch_is_not_reported_as_processed_no_phone(self) -> None:
+        def fake_get(_session, url: str, **_kwargs):
+            if url.endswith("/robots.txt"):
+                return url, 404, {"Content-Type": "text/plain"}, ""
+            return None
+
+        with patch.object(phone, "is_public_http_url", return_value=True), patch.object(
+            phone, "safe_get_text", side_effect=fake_get
+        ):
+            result = phone.discover_site_result(object(), "https://example.com/", 4, 20, 0)
+
+        self.assertEqual(result["state"], "needs_review")
+        self.assertEqual(result["reason"], "fetch_failed")
+        self.assertEqual(result["pages_fetched"], 0)
+
+    def test_successful_html_without_phone_is_processed_no_phone(self) -> None:
+        def fake_get(_session, url: str, **_kwargs):
+            if url.endswith("/robots.txt"):
+                return url, 404, {"Content-Type": "text/plain"}, ""
+            return url, 200, {"Content-Type": "text/html; charset=utf-8"}, "<html><body>会社概要</body></html>"
+
+        with patch.object(phone, "is_public_http_url", return_value=True), patch.object(
+            phone, "safe_get_text", side_effect=fake_get
+        ):
+            result = phone.discover_site_result(object(), "https://example.com/", 4, 20, 0)
+
+        self.assertEqual(result["state"], "processed_no_phone")
+        self.assertIsNone(result["reason"])
+        self.assertEqual(result["pages_fetched"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

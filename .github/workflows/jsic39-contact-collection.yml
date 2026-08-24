@@ -131,6 +131,8 @@ jobs:
           python official_site_phone_enricher.py \
             --db "$WORK/targets.sqlite3" \
             --output "$WORK/phones.csv" \
+            --progress "$WORK/progress.jsonl" \
+            --summary "$WORK/collection_summary.json" \
             --max-pages "$MAX_PAGES" \
             --max-candidates 5 \
             --sleep 0.75 \
@@ -169,6 +171,7 @@ jobs:
             --all-companies ../../collection/jsic39_all.csv \
             --manifest '../../batches/**/manifest.csv' \
             --phones '../../batches/**/phones.csv' \
+            --progress '../../batches/**/progress.jsonl' \
             --output output/jsic39_public_contacts.csv \
             --summary output/jsic39_collection_summary.json
           cp ../../collection/export_summary.json output/export_summary.json

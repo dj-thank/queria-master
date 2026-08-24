@@ -182,6 +182,49 @@ class Jsic39CollectionTest(unittest.TestCase):
         self.assertEqual(rows["1000000000002"]["収集状態"], "processed_no_phone")
         self.assertEqual(rows["1000000000003"]["収集状態"], "website_missing")
 
+    def test_merge_uses_completed_progress_instead_of_manifest_as_processing_proof(self) -> None:
+        manifest = self.root / "manifest.csv"
+        module.write_csv(
+            manifest,
+            ["法人番号"],
+            [{"法人番号": "1000000000001"}, {"法人番号": "1000000000002"}],
+        )
+        progress = self.root / "progress.jsonl"
+        progress.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "corporate_number": "1000000000001",
+                "state": "phone_candidate_found",
+                "candidates": [{
+                    "phone": "0312345678",
+                    "candidate_type": "代表電話",
+                    "url": "https://alpha.example/company",
+                    "context": "会社概要 代表電話",
+                    "source": "text",
+                    "score": 0.95,
+                }],
+                "completed_at": "2026-08-24T00:00:00Z",
+            }, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        output = self.root / "output.csv"
+        summary = self.root / "merge.json"
+
+        result = module.merge_batches(
+            all_companies_csv=self.companies,
+            manifests=[str(manifest)],
+            phone_files=[],
+            progress_files=[str(progress)],
+            output=output,
+            summary=summary,
+        )
+
+        self.assertEqual(result["targeted_for_phone"], 2)
+        self.assertEqual(result["processed_for_phone"], 1)
+        rows = {row["法人番号"]: row for row in module.read_csv(output)}
+        self.assertEqual(rows["1000000000001"]["収集状態"], "phone_candidate_found")
+        self.assertEqual(rows["1000000000002"]["収集状態"], "website_pending")
+
 
 if __name__ == "__main__":
     unittest.main()

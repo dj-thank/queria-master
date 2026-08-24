@@ -28,14 +28,20 @@ def make_target_csv(source: Path) -> Path:
         for row in reader:
             corporate_number = (row.get("corporate_number") or "").strip()
             website = (row.get("website") or "").strip()
-            if len(corporate_number) == 13 and corporate_number.isdigit() and website:
+            state = (row.get("state") or "").strip()
+            if (
+                state == "pending_official_site"
+                and len(corporate_number) == 13
+                and corporate_number.isdigit()
+                and website
+            ):
                 writer.writerow({
                     "corporate_number": corporate_number,
-                    "company_name": row.get("entity_key") or corporate_number,
-                    "prefecture_name": "",
-                    "city_name": "",
-                    "employee_number": "",
-                    "capital_stock": "",
+                    "company_name": row.get("company_name") or row.get("entity_key") or corporate_number,
+                    "prefecture_name": row.get("prefecture_name") or "",
+                    "city_name": row.get("city_name") or "",
+                    "employee_number": row.get("employee_number") or "",
+                    "capital_stock": row.get("capital_stock") or "",
                     "company_url": website,
                 })
     return path

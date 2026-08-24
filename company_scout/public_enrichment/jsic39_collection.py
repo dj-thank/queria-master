@@ -205,6 +205,28 @@ def _expand_patterns(patterns: list[str]) -> list[Path]:
     return sorted(paths)
 
 
+def _read_progress_jsonl(patterns: list[str]) -> tuple[dict[str, dict[str, Any]], list[Path]]:
+    """Return the latest durable completion record for each corporate number."""
+    paths = _expand_patterns(patterns)
+    latest: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Invalid progress JSONL: {path}:{line_number}") from exc
+                corporate_number = clean(record.get("corporate_number"))
+                state = clean(record.get("state"))
+                if not corporate_number or not state:
+                    raise ValueError(f"Progress record lacks corporate_number/state: {path}:{line_number}")
+                latest[corporate_number] = record
+    return latest, paths
+
+
 def _candidate_key(row: dict[str, str]) -> tuple[float, int, int, int]:
     confidence = float(clean(row.get("信頼度")) or 0)
     rank = as_int(row.get("候補順位")) or 999999
@@ -223,6 +245,7 @@ def merge_batches(
     all_companies_csv: Path,
     manifests: list[str],
     phone_files: list[str],
+    progress_files: list[str] | None = None,
     output: Path,
     summary: Path,
 ) -> dict[str, Any]:
@@ -230,10 +253,17 @@ def merge_batches(
     manifest_paths = _expand_patterns(manifests)
     phone_paths = _expand_patterns(phone_files)
 
-    processed: set[str] = set()
+    targeted: set[str] = set()
     for path in manifest_paths:
         for row in read_csv(path):
-            processed.add(clean(row.get("法人番号")))
+            corporate_number = clean(row.get("法人番号"))
+            if corporate_number:
+                targeted.add(corporate_number)
+
+    progress_by_company, progress_paths = _read_progress_jsonl(progress_files or [])
+    # Legacy artifacts did not write per-company progress. Preserve their old
+    # interpretation only when no progress artifact was supplied at all.
+    processed = set(progress_by_company) if progress_paths else set(targeted)
 
     candidates_by_company: dict[str, dict[str, dict[str, str]]] = {}
     for path in phone_paths:
@@ -242,6 +272,30 @@ def merge_batches(
             phone_digits = re.sub(r"\D", "", clean(row.get("電話番号")))
             if not corporate_number or not phone_digits:
                 continue
+            company_candidates = candidates_by_company.setdefault(corporate_number, {})
+            current = company_candidates.get(phone_digits)
+            if current is None or _candidate_key(row) > _candidate_key(current):
+                company_candidates[phone_digits] = row
+
+    # The append-only progress log is the crash-safe source of truth. Rebuild
+    # candidate rows from it so a process interruption between progress commit
+    # and CSV export cannot lose successful evidence.
+    for corporate_number, progress_record in progress_by_company.items():
+        for rank, candidate in enumerate(progress_record.get("candidates") or [], start=1):
+            phone_digits = re.sub(r"\D", "", clean(candidate.get("phone")))
+            if not phone_digits:
+                continue
+            row = {
+                "法人番号": corporate_number,
+                "候補順位": str(rank),
+                "電話番号": clean(candidate.get("phone")),
+                "電話種別候補": clean(candidate.get("candidate_type")) or "未分類",
+                "根拠URL": clean(candidate.get("url")),
+                "根拠テキスト": clean(candidate.get("context")),
+                "抽出方法": clean(candidate.get("source")),
+                "信頼度": str(candidate.get("score") or 0),
+                "取得日時": clean(progress_record.get("completed_at")),
+            }
             company_candidates = candidates_by_company.setdefault(corporate_number, {})
             current = company_candidates.get(phone_digits)
             if current is None or _candidate_key(row) > _candidate_key(current):
@@ -268,7 +322,8 @@ def merge_batches(
         if candidates:
             status = "phone_candidate_found"
         elif corporate_number in processed:
-            status = "processed_no_phone"
+            progress_state = clean(progress_by_company.get(corporate_number, {}).get("state"))
+            status = progress_state if progress_state and progress_state != "phone_candidate_found" else "processed_no_phone"
         elif website:
             status = "website_pending"
         else:
@@ -341,11 +396,13 @@ def merge_batches(
     result = {
         "companies": len(all_rows),
         "companies_with_web": website_count,
+        "targeted_for_phone": len(targeted),
         "processed_for_phone": processed_count,
         "companies_with_phone_candidates": companies_with_phone,
         "phone_candidates_total": candidate_total,
         "manifest_files": [str(path) for path in manifest_paths],
         "phone_files": [str(path) for path in phone_paths],
+        "progress_files": [str(path) for path in progress_paths],
         "output": str(output),
     }
     summary.parent.mkdir(parents=True, exist_ok=True)
@@ -370,6 +427,7 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--all-companies", type=Path, required=True)
     merge.add_argument("--manifest", action="append", default=[], required=True)
     merge.add_argument("--phones", action="append", default=[], required=True)
+    merge.add_argument("--progress", action="append", default=[])
     merge.add_argument("--output", type=Path, required=True)
     merge.add_argument("--summary", type=Path, required=True)
     return parser
@@ -392,6 +450,7 @@ def main() -> int:
             all_companies_csv=args.all_companies,
             manifests=args.manifest,
             phone_files=args.phones,
+            progress_files=args.progress,
             output=args.output,
             summary=args.summary,
         )
