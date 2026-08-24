@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 
 import duckdb
@@ -25,7 +26,19 @@ ENRICHED_HEADERS = [
     "city_name",
     "employee_number",
     "capital_stock",
+    "scope_label",
+    "dataset_generation",
+    "jsic_major_codes",
+    "jsic_middle_codes",
 ]
+
+
+def middle_code(industry_code: object) -> str:
+    for token in str(industry_code or "").split("|"):
+        match = re.fullmatch(r"G?(37|38|39|40|41)", token.strip())
+        if match:
+            return match.group(1)
+    return ""
 
 
 def enrich_targets(source: Path, database: Path, output: Path) -> dict[str, object]:
@@ -39,9 +52,16 @@ def enrich_targets(source: Path, database: Path, output: Path) -> dict[str, obje
 
     con = duckdb.connect(str(database), read_only=True)
     try:
+        manifest = dict(con.execute("SELECT dataset_key, value FROM meta.dataset_manifest").fetchall())
+        if manifest.get("dataset_key") != "G37_41_FUMA":
+            raise ValueError("Release runtime is not the G37_41_FUMA dataset")
+        generation = str(manifest.get("generation") or "").strip()
+        scope = str(manifest.get("scope") or "")
+        if not generation or not all(token in scope for token in ["G", "37", "38", "39", "40", "41"]):
+            raise ValueError("Release runtime lacks the required G37-G41 scope manifest")
         metadata_rows = con.execute(
             """
-            SELECT entity_key, name, prefecture, city, employees, capital
+            SELECT entity_key, name, prefecture, city, employees, capital, industry_code
             FROM core.g_companies
             """
         ).fetchall()
@@ -54,8 +74,12 @@ def enrich_targets(source: Path, database: Path, output: Path) -> dict[str, obje
             "city_name": city,
             "employee_number": employees,
             "capital_stock": capital,
+            "scope_label": "G37-G41",
+            "dataset_generation": generation,
+            "jsic_major_codes": "G",
+            "jsic_middle_codes": middle_code(industry_code),
         }
-        for entity_key, name, prefecture, city, employees, capital in metadata_rows
+        for entity_key, name, prefecture, city, employees, capital, industry_code in metadata_rows
     }
 
     matched = 0

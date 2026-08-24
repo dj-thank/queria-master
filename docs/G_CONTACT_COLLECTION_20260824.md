@@ -49,6 +49,6 @@
 
 `.github/workflows/g-contact-collection.yml` は手動実行専用で、公開済みReleaseの `phone_targets_g37_41.csv` と同じRelease generationのruntime DBを読み、会社名・従業員数・資本金を復元して8シャードへ分ける。既定は1シャード125社、合計1,000社。
 
-公開済みv0.10.0アセットの現行smokeでは59,581行を59,581行すべてruntime DBへ照合でき、電話未収集の既知公式HPは4,159社だった。本receiptのローカル再生成スナップショット3,930社とは入力generationが異なるため、件数を混ぜず、各runのRelease tagとmanifestで固定する。
+公開済みv0.10.0アセットの現行smokeでは59,581行を59,581行すべてruntime DBへ照合でき、generation `g-v0.10.0-fuma-c3c570cd5a5d`、scope `G37-G41`、JSIC大分類`G`を各ターゲットとmanifestへ束縛した。電話未収集の既知公式HPは4,159社だった。本receiptのローカル再生成スナップショット3,930社とは入力generationが異なるため、件数を混ぜず、各runのRelease tagとmanifestで固定する。
 
 前回runを継続する場合は `prior_run_id` を指定する。各シャードのprior manifestが現在manifestとbyte一致した場合だけprogress JSONLを復元し、不一致、欠落、非数値inputは開始前にfail closedする。新しいmerge経路ではprogressが必須であり、manifestだけを処理済み証拠にする旧挙動は明示的なlegacy flagへ隔離した。Actions artifactは90日保持で、ReleaseやGit履歴へ候補データを自動公開しない。

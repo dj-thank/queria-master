@@ -14,6 +14,38 @@ import official_site_phone_enricher as phone
 
 
 class PhoneProgressTests(unittest.TestCase):
+    def test_resume_rejects_progress_bound_to_a_different_official_host(self) -> None:
+        targets = [{
+            "source_id": "alpha",
+            "company_name": "Alpha",
+            "corporate_number": "1000000000001",
+            "website_url": "https://alpha.example/",
+        }]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            progress = root / "progress.jsonl"
+            progress.write_text(json.dumps({
+                "schema_version": 1,
+                "corporate_number": "1000000000001",
+                "official_site_url": "https://wrong.example/",
+                "state": "processed_no_phone",
+                "candidates": [],
+                "completed_at": "2026-08-24T00:00:00Z",
+            }) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "official site mismatch"):
+                phone.collect_targets(
+                    targets,
+                    session=object(),
+                    output=root / "phones.csv",
+                    progress=progress,
+                    max_pages=4,
+                    max_candidates=5,
+                    timeout=20,
+                    sleep_s=0,
+                    resume=True,
+                )
+
     def test_empty_shard_still_emits_resume_and_output_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -135,8 +167,8 @@ class PhoneProgressTests(unittest.TestCase):
             progress = root / "progress.jsonl"
             progress.write_text(
                 "\n".join([
-                    json.dumps({"schema_version": 1, "corporate_number": "1000000000001", "state": "needs_review", "candidates": [], "completed_at": "2026-08-24T00:00:00Z"}),
-                    json.dumps({"schema_version": 1, "corporate_number": "1000000000002", "state": "processed_no_phone", "candidates": [], "completed_at": "2026-08-24T00:00:00Z"}),
+                    json.dumps({"schema_version": 1, "corporate_number": "1000000000001", "official_site_url": "https://alpha.example/", "state": "needs_review", "candidates": [], "completed_at": "2026-08-24T00:00:00Z"}),
+                    json.dumps({"schema_version": 1, "corporate_number": "1000000000002", "official_site_url": "https://beta.example/", "state": "processed_no_phone", "candidates": [], "completed_at": "2026-08-24T00:00:00Z"}),
                 ]) + "\n",
                 encoding="utf-8",
             )
@@ -175,6 +207,7 @@ class PhoneProgressTests(unittest.TestCase):
             valid = json.dumps({
                 "schema_version": 1,
                 "corporate_number": "1000000000001",
+                "official_site_url": "https://alpha.example/",
                 "state": "processed_no_phone",
                 "candidates": [],
                 "completed_at": "2026-08-24T00:00:00Z",

@@ -82,6 +82,26 @@ class Jsic39CollectionTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def test_prepare_shard_rejects_invalid_ranges(self) -> None:
+        with self.assertRaisesRegex(ValueError, "offset"):
+            module.prepare_shard(
+                companies_csv=self.companies,
+                database=self.root / "negative.sqlite3",
+                manifest=self.root / "negative.csv",
+                offset=-1,
+                limit=1,
+                summary=None,
+            )
+        with self.assertRaisesRegex(ValueError, "limit"):
+            module.prepare_shard(
+                companies_csv=self.companies,
+                database=self.root / "zero.sqlite3",
+                manifest=self.root / "zero.csv",
+                offset=0,
+                limit=0,
+                summary=None,
+            )
+
     def test_prepare_shard_prioritizes_and_builds_compatible_db(self) -> None:
         database = self.root / "shard.sqlite3"
         manifest = self.root / "manifest.csv"

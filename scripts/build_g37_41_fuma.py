@@ -1039,6 +1039,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     public_contact_stats.update(
         apply_public_establishment_contacts(companies, public_contacts, phone_rows, website_rows)
     )
+    generation = f"g-v{PACKAGE_VERSION}-fuma-{sha256(xlsx)[:12]}"
     phone_state = [
         {
             "entity_key": company["entity_key"],
@@ -1048,6 +1049,10 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "city_name": company["city"],
             "employee_number": company["employees"],
             "capital_stock": company["capital"],
+            "scope_label": "G37-G41",
+            "dataset_generation": generation,
+            "jsic_major_codes": "G",
+            "jsic_middle_codes": company["industry_middle_code"] or "",
             "website": company["website"],
             "state": company["phone_status"] if company["phone"] else (
                 "pending_official_site" if company["website"] and company["corporate_number"]
@@ -1059,8 +1064,6 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         }
         for company in companies
     ]
-
-    generation = f"g-v{PACKAGE_VERSION}-fuma-{sha256(xlsx)[:12]}"
     build_dir = out / "_build"
     build_dir.mkdir(parents=True, exist_ok=True)
     canonical_path = build_dir / "queria_master_g_fuma.duckdb"
@@ -1113,7 +1116,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     with target_targets.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=[
             "entity_key", "corporate_number", "company_name", "prefecture_name", "city_name",
-            "employee_number", "capital_stock", "website", "state", "last_completed_at", "last_error",
+            "employee_number", "capital_stock", "scope_label", "dataset_generation",
+            "jsic_major_codes", "jsic_middle_codes", "website", "state", "last_completed_at", "last_error",
         ])
         writer.writeheader()
         writer.writerows(phone_state)

@@ -458,6 +458,37 @@ def _row_value(row: Any, key: str) -> Any:
         return None
 
 
+def official_site_binding(value: Any) -> tuple[str, str, str]:
+    url = str(value or "").strip()
+    if not re.match(r"^https?://", url, re.I):
+        url = "https://" + url.lstrip("/")
+    parsed = urlparse(url)
+    return (
+        (parsed.hostname or "").lower().removeprefix("www."),
+        parsed.path.rstrip("/") or "/",
+        parsed.query,
+    )
+
+
+def validate_progress_bindings(targets: list[Any], progress_by_company: dict[str, dict[str, Any]]) -> None:
+    for row in targets:
+        corporate_number = str(_row_value(row, "corporate_number") or "").strip()
+        record = progress_by_company.get(corporate_number)
+        if record is None:
+            continue
+        target_url = str(_row_value(row, "website_url") or "")
+        record_url = str(record.get("official_site_url") or "")
+        if not record_url or official_site_binding(record_url) != official_site_binding(target_url):
+            raise ValueError(f"official site mismatch in progress: {corporate_number}")
+        target_host = official_site_binding(target_url)[0]
+        for candidate in record.get("candidates") or []:
+            evidence_url = str(candidate.get("url") or "")
+            if not evidence_url or official_site_binding(evidence_url)[0] != target_host:
+                raise ValueError(f"candidate evidence host mismatch in progress: {corporate_number}")
+            if not normalize_phone(str(candidate.get("phone") or "")):
+                raise ValueError(f"invalid phone candidate in progress: {corporate_number}")
+
+
 def load_progress(path: Path) -> tuple[dict[str, dict[str, Any]], int]:
     """Load the latest record per company, tolerating one truncated tail line."""
     if not path.is_file():
@@ -641,6 +672,7 @@ def collect_targets(
         for row in targets
         if str(_row_value(row, "corporate_number") or "").strip()
     }
+    validate_progress_bindings(targets, progress_by_company)
     already_completed = sum(
         1
         for number in target_numbers
