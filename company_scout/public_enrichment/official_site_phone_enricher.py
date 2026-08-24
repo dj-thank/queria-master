@@ -237,7 +237,7 @@ def safe_get_text(
             encoding = response.encoding or "utf-8"
             text = b"".join(chunks).decode(encoding, errors="replace")
             return current, response.status_code, dict(response.headers), text
-        except (ValueError, LookupError):
+        except (ValueError, LookupError, requests.RequestException):
             return None
         finally:
             response.close()
