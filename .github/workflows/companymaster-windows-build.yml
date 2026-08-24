@@ -33,6 +33,11 @@ jobs:
         run: |
           npm run tauri:build 2>&1 | Tee-Object -FilePath build.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage portable Windows app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Copy-Item src-tauri\target\release\company-master.exe artifacts\CompanyMaster-G37-41.exe
       - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -45,7 +50,7 @@ jobs:
         with:
           name: CompanyMaster-Windows
           path: |
-            company_scout/src-tauri/target/release/CompanyMaster-G37-41.exe
+            company_scout/artifacts/CompanyMaster-G37-41.exe
             company_scout/src-tauri/target/release/bundle/**/*.exe
             company_scout/src-tauri/target/release/bundle/**/*.msi
           if-no-files-found: error
