@@ -163,21 +163,32 @@ jobs:
 
           if [[ -n "$PRIOR_RUN_ID" ]]; then
             mkdir -p "$WORK/prior-archive" "$WORK/prior"
-            gh run download "$PRIOR_RUN_ID" \
-              --repo "$GITHUB_REPOSITORY" \
-              --name "g-contact-shard-${SHARD}" \
-              --dir "$WORK/prior-archive"
-            openssl enc -d -aes-256-cbc -pbkdf2 \
-              -pass env:G_CONTACT_ARTIFACT_KEY \
-              -in "$WORK/prior-archive/g-contact-shard-${SHARD}.tar.gz.enc" |
-              tar -C "$WORK/prior" -xzf -
-            test -s "$WORK/prior/manifest.csv"
-            test -e "$WORK/prior/progress.jsonl"
-            cmp --silent "$WORK/prior/manifest.csv" "$WORK/manifest.csv" || {
-              echo "Prior progress manifest does not match this shard." >&2
+            PRIOR_ARTIFACT_NAME="g-contact-shard-${SHARD}"
+            PRIOR_ARTIFACT_COUNT="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${PRIOR_RUN_ID}/artifacts?name=${PRIOR_ARTIFACT_NAME}" \
+              --jq '.total_count')"
+            if [[ "$PRIOR_ARTIFACT_COUNT" == "1" ]]; then
+              gh run download "$PRIOR_RUN_ID" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name "$PRIOR_ARTIFACT_NAME" \
+                --dir "$WORK/prior-archive"
+              openssl enc -d -aes-256-cbc -pbkdf2 \
+                -pass env:G_CONTACT_ARTIFACT_KEY \
+                -in "$WORK/prior-archive/g-contact-shard-${SHARD}.tar.gz.enc" |
+                tar -C "$WORK/prior" -xzf -
+              test -s "$WORK/prior/manifest.csv"
+              test -e "$WORK/prior/progress.jsonl"
+              cmp --silent "$WORK/prior/manifest.csv" "$WORK/manifest.csv" || {
+                echo "Prior progress manifest does not match this shard." >&2
+                exit 1
+              }
+              cp "$WORK/prior/progress.jsonl" "$WORK/progress.jsonl"
+            elif [[ "$PRIOR_ARTIFACT_COUNT" == "0" ]]; then
+              echo "Prior artifact for shard ${SHARD} is absent; starting this shard fresh."
+            else
+              echo "Expected at most one prior artifact for shard ${SHARD}; got ${PRIOR_ARTIFACT_COUNT}." >&2
               exit 1
-            }
-            cp "$WORK/prior/progress.jsonl" "$WORK/progress.jsonl"
+            fi
           fi
 
           python official_site_phone_enricher.py \

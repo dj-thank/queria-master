@@ -86,6 +86,41 @@ class PhoneSecurityTests(unittest.TestCase):
         finally:
             session.close()
 
+    def test_truncated_chunked_response_is_a_site_failure_not_a_process_failure(self) -> None:
+        class TruncatedResponse:
+            status_code = 200
+            headers: dict[str, str] = {}
+            encoding = "utf-8"
+
+            def __init__(self) -> None:
+                self.closed = False
+
+            def iter_content(self, *, chunk_size: int):
+                self.chunk_size = chunk_size
+                raise requests.exceptions.ChunkedEncodingError("Response ended prematurely")
+
+            def close(self) -> None:
+                self.closed = True
+
+        response = TruncatedResponse()
+        session = phone.build_safe_session()
+        try:
+            with patch.object(phone, "is_public_http_url", return_value=True), patch.object(
+                session, "get", return_value=response
+            ):
+                self.assertIsNone(
+                    phone.safe_get_text(
+                        session,
+                        "https://example.com/company",
+                        expected_host="example.com",
+                        timeout=20,
+                        max_bytes=phone.MAX_HTML_BYTES,
+                    )
+                )
+        finally:
+            session.close()
+        self.assertTrue(response.closed)
+
     def test_candidate_scoring_penalizes_fax(self) -> None:
         tel = phone.score_candidate("0312345678", "代表 TEL", "text")
         fax = phone.score_candidate("0312345678", "FAX", "text")
