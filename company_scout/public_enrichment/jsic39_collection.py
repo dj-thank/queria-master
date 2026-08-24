@@ -260,7 +260,15 @@ def merge_batches(
             if corporate_number:
                 targeted.add(corporate_number)
 
-    progress_by_company, progress_paths = _read_progress_jsonl(progress_files or [])
+    requested_progress = list(progress_files or [])
+    missing_progress_patterns = [
+        pattern
+        for pattern in requested_progress
+        if not glob.glob(pattern, recursive=True) and not Path(pattern).is_file()
+    ]
+    if missing_progress_patterns:
+        raise FileNotFoundError(f"Requested progress artifact was not found: {missing_progress_patterns}")
+    progress_by_company, progress_paths = _read_progress_jsonl(requested_progress)
     # Legacy artifacts did not write per-company progress. Preserve their old
     # interpretation only when no progress artifact was supplied at all.
     processed = set(progress_by_company) if progress_paths else set(targeted)

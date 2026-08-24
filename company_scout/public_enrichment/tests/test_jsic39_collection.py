@@ -261,6 +261,20 @@ class Jsic39CollectionTest(unittest.TestCase):
         self.assertEqual(result["fax_only_companies"], 1)
         self.assertEqual(result["companies_with_voice_candidates"], 0)
 
+    def test_merge_fails_closed_when_requested_progress_artifact_is_missing(self) -> None:
+        manifest = self.root / "manifest.csv"
+        module.write_csv(manifest, ["法人番号"], [{"法人番号": "1000000000001"}])
+
+        with self.assertRaisesRegex(FileNotFoundError, "progress"):
+            module.merge_batches(
+                all_companies_csv=self.companies,
+                manifests=[str(manifest)],
+                phone_files=[],
+                progress_files=[str(self.root / "missing-progress-*.jsonl")],
+                output=self.root / "output.csv",
+                summary=self.root / "summary.json",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
