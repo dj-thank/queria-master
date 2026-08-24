@@ -137,6 +137,46 @@ class PhoneProgressTests(unittest.TestCase):
             self.assertEqual(result["retried_this_run"], 1)
             self.assertEqual(result["states"], {"processed_no_phone": 2})
 
+    def test_resume_repairs_a_truncated_tail_before_appending_new_progress(self) -> None:
+        targets = [
+            {"source_id": "alpha", "company_name": "Alpha", "corporate_number": "1000000000001", "website_url": "https://alpha.example/"},
+            {"source_id": "beta", "company_name": "Beta", "corporate_number": "1000000000002", "website_url": "https://beta.example/"},
+        ]
+
+        def discoverer(_session, _website: str, _max_pages: int, _timeout: float, _sleep_s: float):
+            return {"state": "processed_no_phone", "pages_fetched": 1, "reason": None, "candidates": []}
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            progress = root / "progress.jsonl"
+            valid = json.dumps({
+                "schema_version": 1,
+                "corporate_number": "1000000000001",
+                "state": "processed_no_phone",
+                "candidates": [],
+                "completed_at": "2026-08-24T00:00:00Z",
+            })
+            progress.write_text(valid + "\n" + '{"schema_version":1', encoding="utf-8")
+
+            result = phone.collect_targets(
+                targets,
+                session=object(),
+                output=root / "phones.csv",
+                progress=progress,
+                max_pages=4,
+                max_candidates=5,
+                timeout=20,
+                sleep_s=0,
+                resume=True,
+                discoverer=discoverer,
+            )
+            latest, ignored = phone.load_progress(progress)
+
+            self.assertEqual(result["ignored_truncated_tail_lines"], 1)
+            self.assertEqual(result["attempted_this_run"], 1)
+            self.assertEqual(set(latest), {"1000000000001", "1000000000002"})
+            self.assertEqual(ignored, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

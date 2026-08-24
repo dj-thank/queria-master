@@ -485,8 +485,28 @@ def load_progress(path: Path) -> tuple[dict[str, dict[str, Any]], int]:
 
 def append_progress(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    payload = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    with path.open("ab+") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell():
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b"\n":
+                handle.seek(0, os.SEEK_END)
+                handle.write(b"\n")
+        handle.seek(0, os.SEEK_END)
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def truncate_invalid_progress_tail(path: Path) -> None:
+    data = path.read_bytes()
+    last_newline = data.rfind(b"\n")
+    valid = data[: last_newline + 1] if last_newline >= 0 else b""
+    with path.open("r+b") as handle:
+        handle.seek(0)
+        handle.write(valid)
+        handle.truncate()
         handle.flush()
         os.fsync(handle.fileno())
 
@@ -612,6 +632,8 @@ def collect_targets(
     if unsupported_retry_states:
         raise ValueError(f"Unsupported retry states: {sorted(unsupported_retry_states)}")
     progress_by_company, ignored_tail_lines = load_progress(progress) if resume else ({}, 0)
+    if ignored_tail_lines:
+        truncate_invalid_progress_tail(progress)
     target_numbers = {
         str(_row_value(row, "corporate_number") or "").strip()
         for row in targets
