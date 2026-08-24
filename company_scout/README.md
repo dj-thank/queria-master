@@ -2,6 +2,8 @@
 
 社内向けの高速企業探索 Windows アプリです。全国法人マスターをローカル DuckDB に保持し、自然文または詳細条件で検索し、必要な企業だけ GPT-5.6 Luna + Codex App Server で公開 Web を深掘りし、そのまま CSV / Salesforce に出力します。
 
+> `company_scout/` のReact + Tauri/Rust版が、新しいデスクトップ検索UIの正本です。リポジトリ直下の `queria_master/desktop_app.py` は既存配布向けのレガシー・メンテナンスUIです。UI、100行ページング、SQLite FTS5/DuckDBフォールバックの設計契約は [`../docs/UI_SEARCH_WORKBENCH_2026-08-21.md`](../docs/UI_SEARCH_WORKBENCH_2026-08-21.md) を参照してください。
+
 ## MVPでできること
 
 - 全国法人を業種限定なしで検索

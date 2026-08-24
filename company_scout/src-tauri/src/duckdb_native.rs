@@ -4,6 +4,7 @@ use serde::Serialize;
 
 const HOUJIN_CATALOG: &str = "https://data.queria.io/houjin_bangou/ducklake.duckdb";
 const GBIZINFO_CATALOG: &str = "https://data.queria.io/gbizinfo/ducklake.duckdb";
+const MIN_NATIONWIDE_COMPANY_COUNT: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NativeDuckDbStatus {
@@ -45,6 +46,7 @@ pub fn sync_company_master(db: &Db) -> Result<NativeSyncResult> {
     }
     let conn = db.connect()?;
     let version: String = conn.query_row("SELECT version()", [], |r| r.get(0))?;
+    let previous_count: i64 = conn.query_row("SELECT count(*) FROM companies", [], |r| r.get(0))?;
 
     // Core extensions are version-matched to the embedded DuckDB runtime.
     conn.execute_batch(
@@ -165,6 +167,17 @@ pub fn sync_company_master(db: &Db) -> Result<NativeSyncResult> {
         return Err(err).context("DuckDBネイティブ同期のstaging作成に失敗しました");
     }
 
+    let validation = validate_refresh(
+        &conn,
+        MIN_NATIONWIDE_COMPANY_COUNT,
+        previous_count.max(0) as u64,
+    );
+    if let Err(err) = validation {
+        let _ = conn.execute_batch("DROP TABLE IF EXISTS companies_refresh;");
+        let _ = conn.execute_batch("DETACH gbiz_native; DETACH houjin_native;");
+        return Err(err).context("DuckDBネイティブ同期のstaging検証に失敗しました");
+    }
+
     let swap_sql = r#"
         BEGIN TRANSACTION;
         DROP TABLE companies;
@@ -194,6 +207,92 @@ pub fn sync_company_master(db: &Db) -> Result<NativeSyncResult> {
     })
 }
 
+fn validate_refresh(
+    connection: &duckdb::Connection,
+    minimum_count: u64,
+    previous_count: u64,
+) -> Result<u64> {
+    let (row_count, distinct_count, invalid_number_count, blank_name_count): (i64, i64, i64, i64) =
+        connection.query_row(
+            r#"SELECT
+             count(*),
+             count(DISTINCT corporate_number),
+             count(*) FILTER (
+               WHERE corporate_number IS NULL
+                  OR NOT regexp_matches(corporate_number, '^[0-9]{13}$')
+             ),
+             count(*) FILTER (WHERE name IS NULL OR trim(name)='')
+           FROM companies_refresh"#,
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+    let row_count = row_count.max(0) as u64;
+    if row_count < minimum_count {
+        return Err(anyhow!(
+            "全国法人スナップショット件数が下限未満です: {row_count} < {minimum_count}"
+        ));
+    }
+    if distinct_count.max(0) as u64 != row_count {
+        return Err(anyhow!(
+            "法人番号の一意件数が一致しません: rows={row_count}, distinct={}",
+            distinct_count.max(0)
+        ));
+    }
+    if invalid_number_count > 0 || blank_name_count > 0 {
+        return Err(anyhow!(
+            "必須項目が不正です: corporate_number={invalid_number_count}, name={blank_name_count}"
+        ));
+    }
+    if previous_count >= minimum_count {
+        let minimum_retained = previous_count.saturating_mul(95) / 100;
+        if row_count < minimum_retained {
+            return Err(anyhow!(
+                "既存全国スナップショットから5%以上減少したためswapを中止しました: previous={previous_count}, staged={row_count}"
+            ));
+        }
+    }
+    Ok(row_count)
+}
+
 fn sql_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_refresh;
+
+    #[test]
+    fn refresh_validation_accepts_complete_unique_stage() {
+        let connection = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
+        connection
+            .execute_batch(
+                r#"CREATE TABLE companies_refresh(corporate_number VARCHAR, name VARCHAR);
+                   INSERT INTO companies_refresh VALUES
+                     ('1000000000001','会社A'),
+                     ('1000000000002','会社B'),
+                     ('1000000000003','会社C');"#,
+            )
+            .expect("create refresh fixture");
+        assert_eq!(validate_refresh(&connection, 3, 3).unwrap(), 3);
+    }
+
+    #[test]
+    fn refresh_validation_rejects_invalid_or_catastrophically_small_stage() {
+        let connection = duckdb::Connection::open_in_memory().expect("in-memory DuckDB");
+        connection
+            .execute_batch(
+                r#"CREATE TABLE companies_refresh(corporate_number VARCHAR, name VARCHAR);
+                   INSERT INTO companies_refresh VALUES ('bad','');"#,
+            )
+            .expect("create refresh fixture");
+        assert!(validate_refresh(&connection, 1, 1).is_err());
+
+        connection
+            .execute_batch(
+                "DELETE FROM companies_refresh; INSERT INTO companies_refresh VALUES ('1000000000001','会社A');",
+            )
+            .expect("replace fixture");
+        assert!(validate_refresh(&connection, 1, 100).is_err());
+    }
 }

@@ -5,7 +5,9 @@ import tempfile
 import time
 import unittest
 
-from queria_master.search_index import SearchIndex, build_search_index
+from queria_master.pipeline import PipelineError
+from queria_master.query import search_companies
+from queria_master.search_index import SearchIndex, SearchIndexError, build_search_index
 
 
 try:
@@ -29,8 +31,8 @@ class SearchIndexTests(unittest.TestCase):
                     """
                     CREATE TABLE core.companies AS
                     SELECT * FROM (VALUES
-                        ('1000000000001', 'ソフトウェア開発株式会社', '東京都', '渋谷区', 'G', '39', 'G|G39', 20, 1000000, 'https://software.example.jp', 'ソフトウェア開発', '301'),
-                        ('1000000000002', '食品製造株式会社', '大阪府', '大阪市', 'E', '09', 'E|E09', 10, 500000, 'https://food.example.jp', '食品製造', '301'),
+                        ('1000000000001', 'ソフトウェア開発株式会社', '東京都', '渋谷区', 'G|H', '39|42', 'G|G39|H42421', 20, 1000000, 'https://software.example.jp', 'ソフトウェア開発', '301'),
+                        ('1000000000002', '食品製造株式会社', '大阪府', '大阪市', 'E', '09', 'E|E09|noiseH42noise', 10, 500000, 'https://food.example.jp', '食品製造', '301'),
                         ('1000000000003', 'クラウドサービス株式会社', '東京都', '港区', 'G', '40', 'G|G40', 30, 2000000, 'https://cloud.example.jp', 'クラウドサービス', '101'),
                         ('1000000000004', 'ソフト開発ウェア株式会社', '東京都', '新宿区', 'G', '39', 'G|G39', 5, 100000, 'https://near.example.jp', 'ソフト開発ウェア', '301')
                     ) AS t(corporate_number, company_name, prefecture_name, city_name,
@@ -115,6 +117,38 @@ class SearchIndexTests(unittest.TestCase):
                 self.assertEqual(contact_hits[0]["email"], "info@example.jp")
                 self.assertEqual(contact_hits[0]["phone"], "03-1234-5678")
 
+                phone_hits = index.search("03-1234-5678", fast=True, limit=10)
+                self.assertEqual(
+                    [hit["corporate_number"] for hit in phone_hits],
+                    ["1000000000001"],
+                )
+                url_hits = index.search("https://software.example.jp", fast=True, limit=10)
+                self.assertEqual(
+                    [hit["corporate_number"] for hit in url_hits],
+                    ["1000000000001"],
+                )
+                inquiry_url_hits = index.search("https://example.jp/contact", fast=True, limit=10)
+                self.assertEqual(
+                    [hit["corporate_number"] for hit in inquiry_url_hits],
+                    ["1000000000001"],
+                )
+
+                detailed_major = index.search(None, industry_majors=("H",), fast=True, limit=10)
+                self.assertEqual(
+                    [hit["corporate_number"] for hit in detailed_major],
+                    ["1000000000001"],
+                )
+                detailed_middle = index.search(None, industry_middles=("42",), fast=True, limit=10)
+                self.assertEqual(
+                    [hit["corporate_number"] for hit in detailed_middle],
+                    ["1000000000001"],
+                )
+
+                with self.assertRaisesRegex(SearchIndexError, "256文字以内"):
+                    index.search("x" * 257, fast=True, limit=10)
+                with self.assertRaisesRegex(SearchIndexError, "NUL文字"):
+                    index.search("株式会社\x00東京", fast=True, limit=10)
+
                 short_fast = index.search("ソ", fast=True, limit=10)
                 self.assertEqual(
                     {hit["corporate_number"] for hit in short_fast},
@@ -148,6 +182,13 @@ class SearchIndexTests(unittest.TestCase):
                 mismatch.close()
             with self.assertRaisesRegex(Exception, "generation_id"):
                 SearchIndex(index_path, database_path=mismatched_database)
+
+            with self.assertRaisesRegex(PipelineError, "256文字以内"):
+                search_companies(
+                    db_path=root / "missing.duckdb",
+                    keyword="x" * 257,
+                    search_index=None,
+                )
 
 
 if __name__ == "__main__":

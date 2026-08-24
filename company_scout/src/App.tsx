@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
   Building2,
+  Check,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -14,6 +15,9 @@ import {
   Loader2,
   LogIn,
   LogOut,
+  Menu,
+  PanelLeftClose,
+  Phone,
   RefreshCw,
   Search,
   Send,
@@ -30,208 +34,344 @@ import type {
   Company,
   DataStatus,
   ResearchReport,
-  SalesforceStatus,
   SalesforceFieldMapping,
   SalesforceJobStatus,
+  SalesforceStatus,
   SavedSearch,
   SearchPlan,
   SearchResult,
 } from "./types";
 
-const blankPlan: SearchPlan = {
+type View = "search" | "research" | "connections";
+type SortField = NonNullable<SearchPlan["sort_by"]>;
+
+const PAGE_SIZE = 100;
+// Match the Rust-side safety ceiling so a 5.8M-row national snapshot can be
+// listed or exported in full. XLSX keeps its stricter worksheet limit server-side.
+const MAX_RESULTS = 10_000_000;
+const fmt = new Intl.NumberFormat("ja-JP");
+
+const emptyPlan = (): SearchPlan => ({
+  text: null,
   prefectures: [],
   cities: [],
-  industry_codes: ["G"],
+  industry_codes: [],
   industry_terms: [],
   company_kinds: [],
   keyword_any: [],
   keyword_all: [],
-  limit: 30000,
+  website_required: null,
+  phone_required: null,
+  sort_by: "relevance",
+  sort_direction: "asc",
+  limit: 100_000,
+});
+
+const prefectures = [
+  "北海道", "青森県", "岩手県", "宮城県", "秋田県", "山形県", "福島県", "茨城県", "栃木県", "群馬県",
+  "埼玉県", "千葉県", "東京都", "神奈川県", "新潟県", "富山県", "石川県", "福井県", "山梨県", "長野県",
+  "岐阜県", "静岡県", "愛知県", "三重県", "滋賀県", "京都府", "大阪府", "兵庫県", "奈良県", "和歌山県",
+  "鳥取県", "島根県", "岡山県", "広島県", "山口県", "徳島県", "香川県", "愛媛県", "高知県", "福岡県",
+  "佐賀県", "長崎県", "熊本県", "大分県", "宮崎県", "鹿児島県", "沖縄県",
+];
+
+const companyKinds = [
+  { value: "301", label: "株式会社" },
+  { value: "302", label: "有限会社" },
+  { value: "303", label: "合名会社" },
+  { value: "304", label: "合資会社" },
+  { value: "305", label: "合同会社" },
+];
+
+const splitValues = (value: string) =>
+  value.split(/[、,\n]/).map((item) => item.trim()).filter(Boolean);
+
+const toOptionalNumber = (value: string) => {
+  if (!value.trim()) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 };
 
-type View = "search" | "ai" | "research" | "connections";
-
-const fmt = new Intl.NumberFormat("ja-JP");
-const maxSearchLimit = 10_000_000;
-const splitValues = (value: string) => value.split(/[、,\n]/).map((v) => v.trim()).filter(Boolean);
-const optionalNumber = (value: string) => value.trim() === "" ? undefined : Number(value);
-const currentYear = new Date().getFullYear();
-const prefectures = ["北海道", "青森県", "岩手県", "宮城県", "秋田県", "山形県", "福島県", "茨城県", "栃木県", "群馬県", "埼玉県", "千葉県", "東京都", "神奈川県", "新潟県", "富山県", "石川県", "福井県", "山梨県", "長野県", "岐阜県", "静岡県", "愛知県", "三重県", "滋賀県", "京都府", "大阪府", "兵庫県", "奈良県", "和歌山県", "鳥取県", "島根県", "岡山県", "広島県", "山口県", "徳島県", "香川県", "愛媛県", "高知県", "福岡県", "佐賀県", "長崎県", "熊本県", "大分県", "宮崎県", "鹿児島県", "沖縄県"];
-const industryPresets: Array<{ label: string; codes: string[]; terms: string[] }> = [
-  // The official JSIC major code is the letter G. The middle codes below are
-  // G37..G41 in the raw Queria path; numeric input remains accepted by Rust.
-  { label: "情報通信業（G）", codes: ["G"], terms: [] },
-  { label: "製造業", codes: [], terms: ["製造"] },
-  { label: "建設・土木", codes: [], terms: ["建設"] },
-  { label: "卸売・小売", codes: [], terms: ["販売"] },
-  { label: "金融・保険", codes: [], terms: ["金融"] },
-  { label: "医療・福祉", codes: [], terms: ["医療"] },
-  { label: "教育", codes: [], terms: ["教育"] },
-  { label: "運輸・物流", codes: [], terms: ["運輸"] },
-];
-const industryMiddle = [
-  { code: "G37", displayCode: "37", label: "通信業" },
-  { code: "G38", displayCode: "38", label: "放送業" },
-  { code: "G39", displayCode: "39", label: "情報サービス業" },
-  { code: "G40", displayCode: "40", label: "インターネット附随サービス業" },
-  { code: "G41", displayCode: "41", label: "映像・音声・文字情報制作業" },
-];
-const companyKinds = ["株式会社", "有限会社", "合同会社", "合資会社", "合名会社", "医療法人", "学校法人", "社会福祉法人", "NPO法人"];
-const employeeRanges = [
-  { label: "指定なし", min: undefined, max: undefined },
-  { label: "1〜9名", min: 1, max: 9 },
-  { label: "10〜49名", min: 10, max: 49 },
-  { label: "50〜299名", min: 50, max: 299 },
-  { label: "300〜999名", min: 300, max: 999 },
-  { label: "1,000名以上", min: 1000, max: undefined },
-];
-const capitalRanges = [
-  { label: "指定なし", min: undefined, max: undefined },
-  { label: "〜1,000万円", min: undefined, max: 10_000_000 },
-  { label: "1,000万〜1億円", min: 10_000_000, max: 100_000_000 },
-  { label: "1億〜10億円", min: 100_000_000, max: 1_000_000_000 },
-  { label: "10億円以上", min: 1_000_000_000, max: undefined },
-];
-const establishedRanges = [
-  { label: "指定なし", from: undefined, to: undefined },
-  { label: "5年以内", from: currentYear - 5, to: undefined },
-  { label: "10年以内", from: currentYear - 10, to: undefined },
-  { label: "20年以内", from: currentYear - 20, to: undefined },
-  { label: "2000年以前", from: undefined, to: 2000 },
-];
-const toggleValue = (values: string[], value: string) => values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
-const displayPageSize = (targetPlan: SearchPlan) => Math.max(1, Math.min(targetPlan.limit, 30000));
-const virtualRowHeight = 52;
-
 function compactNumber(value?: number | null) {
-  if (value == null) return "-";
-  if (value >= 100_000_000) return `${(value / 100_000_000).toFixed(1)}億`;
-  if (value >= 10_000) return `${(value / 10_000).toFixed(0)}万`;
-  return fmt.format(value);
+  if (value == null) return "—";
+  if (value >= 100_000_000) return `${(value / 100_000_000).toFixed(1)}億円`;
+  if (value >= 10_000) return `${fmt.format(Math.round(value / 10_000))}万円`;
+  return `${fmt.format(value)}円`;
+}
+
+function formatKind(value?: string | null) {
+  return companyKinds.find((kind) => kind.value === value)?.label ?? value ?? "—";
+}
+
+function toggle(values: string[], value: string) {
+  return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
+}
+
+function safeHttpUrl(value: string) {
+  const parsed = new URL(value);
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("HTTP(S)以外のURLは開けません");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("認証情報を含むURLは開けません");
+  }
+  return parsed.toString();
 }
 
 function App() {
   const [view, setView] = useState<View>("search");
-  const [prompt, setPrompt] = useState("全国の情報通信業G37〜G41から、公式サイトと電話番号のある会社");
-  const [plan, setPlan] = useState<SearchPlan>(blankPlan);
+  const [plan, setPlan] = useState<SearchPlan>(emptyPlan);
+  const [appliedPlan, setAppliedPlan] = useState<SearchPlan | null>(null);
+  const [query, setQuery] = useState("");
+  const [aiPrompt, setAiPrompt] = useState("");
+  const [aiOpen, setAiOpen] = useState(false);
+  const [filterOpen, setFilterOpen] = useState(() => window.matchMedia("(min-width: 901px)").matches);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [result, setResult] = useState<SearchResult | null>(null);
-  const [page, setPage] = useState(1);
-  const [selected, setSelected] = useState<Company | null>(null);
+  const [detail, setDetail] = useState<Company | null>(null);
+  const [checked, setChecked] = useState<Set<string>>(new Set());
   const [research, setResearch] = useState<ResearchReport | null>(null);
-  const [codex, setCodex] = useState<CodexStatus | null>(null);
   const [data, setData] = useState<DataStatus | null>(null);
+  const [codex, setCodex] = useState<CodexStatus | null>(null);
   const [salesforce, setSalesforce] = useState<SalesforceStatus | null>(null);
   const [salesforceJob, setSalesforceJob] = useState<SalesforceJobStatus | null>(null);
+  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState("");
+  const [listName, setListName] = useState("営業候補");
   const [sfObjectName, setSfObjectName] = useState("Account");
   const [sfExternalId, setSfExternalId] = useState("CorporateNumber__c");
-  const [sfMappingText, setSfMappingText] = useState("name=Name\ncorporate_number=CorporateNumber__c\nwebsite=Website\nphone=Phone\nprefecture=BillingState\ncity=BillingCity\naddress=BillingStreet\nindustry=Industry\nemployees=NumberOfEmployees\nbusiness_summary=Description");
-  const [busy, setBusy] = useState<string | null>(null);
-  const [message, setMessage] = useState<string>("");
-  const [listName, setListName] = useState("営業候補");
-  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
-  const [fieldCategory, setFieldCategory] = useState<"region" | "industry" | "organization" | "scale" | "keywords">("region");
-  const [listScrollTop, setListScrollTop] = useState(0);
-  const listScrollRef = useRef<HTMLDivElement>(null);
+  const [sfMappingText, setSfMappingText] = useState(
+    "name=Name\ncorporate_number=CorporateNumber__c\nwebsite=Website\nphone=Phone\nprefecture=BillingState\ncity=BillingCity\naddress=BillingStreet\nindustry=Industry\nemployees=NumberOfEmployees\nbusiness_summary=Description",
+  );
+  const searchGeneration = useRef(0);
+  const pageCheckboxRef = useRef<HTMLInputElement>(null);
 
-  const displayRows = result?.rows ?? [];
-  const virtualStart = Math.max(0, Math.floor(listScrollTop / virtualRowHeight) - 8);
-  const virtualEnd = Math.min(displayRows.length, virtualStart + 60);
-  const virtualRows = displayRows.slice(virtualStart, virtualEnd);
+  const currentPageSize = result?.page_size || PAGE_SIZE;
+  const totalPages = result ? Math.max(1, Math.ceil(result.total / currentPageSize)) : 1;
+  const currentPage = result?.page ?? 1;
+  const visibleRows = result?.rows ?? [];
+  const allPageChecked = visibleRows.length > 0 && visibleRows.every((row) => checked.has(row.corporate_number));
+  const somePageChecked = visibleRows.some((row) => checked.has(row.corporate_number));
+  const operationPlan = appliedPlan ?? plan;
+  const draftPlan = useMemo<SearchPlan>(
+    () => ({ ...plan, text: query.trim() || null }),
+    [plan, query],
+  );
+  const hasUnappliedChanges = result != null && appliedPlan != null
+    && JSON.stringify(draftPlan) !== JSON.stringify(appliedPlan);
 
-  const filters = useMemo(() => {
-    const out: string[] = [];
-    plan.prefectures.forEach((v) => out.push(v));
-    plan.cities.forEach((v) => out.push(v));
-    plan.industry_terms.forEach((v) => out.push(v));
-    plan.industry_codes.forEach((v) => out.push(`業種 ${v.match(/^G(\d+)$/)?.[1] ?? v}`));
-    if (plan.min_employees != null || plan.max_employees != null)
-      out.push(`従業員 ${plan.min_employees ?? 0}〜${plan.max_employees ?? "∞"}`);
-    if (plan.min_capital != null || plan.max_capital != null)
-      out.push(`資本金 ${compactNumber(plan.min_capital)}〜${compactNumber(plan.max_capital)}`);
-    if (plan.established_from != null || plan.established_to != null)
-      out.push(`設立年 ${plan.established_from ?? "?"}〜${plan.established_to ?? "?"}`);
-    if (plan.website_required) out.push("Webあり");
-    return out;
+  const activeFilters = useMemo(() => {
+    const labels: Array<{ key: string; label: string }> = [];
+    plan.prefectures.forEach((value) => labels.push({ key: `prefecture:${value}`, label: value }));
+    plan.cities.forEach((value) => labels.push({ key: `city:${value}`, label: `市区町村: ${value}` }));
+    plan.industry_codes.forEach((value) => labels.push({ key: `industry-code:${value}`, label: `業種 ${value}` }));
+    plan.industry_terms.forEach((value) => labels.push({ key: `industry-term:${value}`, label: value }));
+    plan.company_kinds.forEach((value) => labels.push({ key: `kind:${value}`, label: formatKind(value) }));
+    if (plan.min_employees != null || plan.max_employees != null) labels.push({ key: "employees", label: `従業員 ${plan.min_employees ?? 0}–${plan.max_employees ?? "上限なし"}` });
+    if (plan.min_capital != null || plan.max_capital != null) labels.push({ key: "capital", label: `資本金 ${compactNumber(plan.min_capital)}–${compactNumber(plan.max_capital)}` });
+    if (plan.established_from != null || plan.established_to != null) labels.push({ key: "established", label: `設立 ${plan.established_from ?? "以前"}–${plan.established_to ?? "以後"}` });
+    if (plan.website_required != null) labels.push({ key: "website", label: plan.website_required ? "Webあり" : "Webなし" });
+    if (plan.phone_required != null) labels.push({ key: "phone", label: plan.phone_required ? "電話あり" : "電話なし" });
+    plan.keyword_any.forEach((value) => labels.push({ key: `keyword-any:${value}`, label: `いずれか: ${value}` }));
+    plan.keyword_all.forEach((value) => labels.push({ key: `keyword-all:${value}`, label: `すべて: ${value}` }));
+    return labels;
   }, [plan]);
+
+  useEffect(() => {
+    if (pageCheckboxRef.current) {
+      pageCheckboxRef.current.indeterminate = somePageChecked && !allPageChecked;
+    }
+  }, [allPageChecked, somePageChecked]);
 
   useEffect(() => {
     void refreshStatus();
   }, []);
 
   async function refreshStatus() {
-    try {
-      const [d, c, sf, memories] = await Promise.allSettled([
-        api.bootstrap(),
-        api.codexStatus(),
-        api.salesforceStatus(),
-        api.recentSearches(12),
-      ]);
-      if (d.status === "fulfilled") setData(d.value);
-      if (d.status === "rejected") setMessage(`データ状態を取得できませんでした: ${String(d.reason)}`);
-      if (c.status === "fulfilled") setCodex(c.value);
-      if (sf.status === "fulfilled") setSalesforce(sf.value);
-      if (memories.status === "fulfilled") setSavedSearches(memories.value);
-    } catch (error) {
-      setMessage(String(error));
-    }
+    const [dataResult, codexResult, salesforceResult, searchesResult] = await Promise.allSettled([
+      api.bootstrap(),
+      api.codexStatus(),
+      api.salesforceStatus(),
+      api.recentSearches(20),
+    ]);
+    if (dataResult.status === "fulfilled") setData(dataResult.value);
+    else setNotice(`データ状態を取得できませんでした: ${String(dataResult.reason)}`);
+    if (codexResult.status === "fulfilled") setCodex(codexResult.value);
+    if (salesforceResult.status === "fulfilled") setSalesforce(salesforceResult.value);
+    if (searchesResult.status === "fulfilled") setSavedSearches(searchesResult.value);
   }
 
-  async function consultAndSearch() {
-    if (!prompt.trim()) return;
-    setBusy("plan");
-    setMessage("");
-    try {
-      const query = prompt.trim();
-      const next = await api.planSearch(query);
-      setPlan(next);
-      setPage(1);
-      await api.saveSearch(query.slice(0, 48), query, next);
-      api.recentSearches(12).then(setSavedSearches).catch(() => undefined);
-      const found = await api.search(next, 1, displayPageSize(next));
-      setResult(found);
-      setSelected(found.rows[0] ?? null);
-      setView("search");
-      setListScrollTop(0);
-      listScrollRef.current?.scrollTo({ top: 0 });
-    } catch (error) {
-      setMessage(String(error));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function runSearch(targetPage = 1, targetPlan = plan) {
+  async function runSearch(targetPlan: SearchPlan, page = 1) {
+    const generation = ++searchGeneration.current;
     setBusy("search");
-    setMessage("");
+    setNotice("");
     try {
-      const found = await api.search(targetPlan, targetPage, displayPageSize(targetPlan));
+      const found = await api.search(targetPlan, page, PAGE_SIZE);
+      if (generation !== searchGeneration.current) return;
+      setPlan(targetPlan);
+      setQuery(targetPlan.text?.trim() ?? "");
+      setAppliedPlan(targetPlan);
       setResult(found);
-      setPage(targetPage);
-      setSelected(found.rows[0] ?? null);
-      setListScrollTop(0);
-      listScrollRef.current?.scrollTo({ top: 0 });
+      setDetail((current) => found.rows.find((row) => row.corporate_number === current?.corporate_number)
+        ?? (window.matchMedia("(min-width: 1201px)").matches ? found.rows[0] ?? null : null));
+      setChecked(new Set());
+      if (found.warnings?.length) setNotice(found.warnings.join(" "));
     } catch (error) {
-      setMessage(String(error));
+      if (generation === searchGeneration.current) setNotice(`検索できませんでした: ${String(error)}`);
+    } finally {
+      if (generation === searchGeneration.current) setBusy(null);
+    }
+  }
+
+  async function directSearch() {
+    const next = { ...draftPlan, sort_by: query.trim() ? "relevance" as const : plan.sort_by };
+    await runSearch(next, 1);
+  }
+
+  async function aiSearch() {
+    if (!aiPrompt.trim()) return;
+    const generation = ++searchGeneration.current;
+    setBusy("plan");
+    setNotice("");
+    try {
+      const next = await api.planSearch(aiPrompt.trim());
+      if (generation !== searchGeneration.current) return;
+      const normalized: SearchPlan = { ...emptyPlan(), ...next, limit: Math.min(next.limit || 100_000, MAX_RESULTS) };
+      setAiOpen(false);
+      await api.saveSearch(aiPrompt.trim().slice(0, 48), aiPrompt.trim(), normalized);
+      if (generation !== searchGeneration.current) return;
+      api.recentSearches(20).then(setSavedSearches).catch(() => undefined);
+      await runSearch(normalized, 1);
+    } catch (error) {
+      if (generation === searchGeneration.current) {
+        setNotice(`AI条件を作成できませんでした: ${String(error)}`);
+      }
+    } finally {
+      if (generation === searchGeneration.current) setBusy(null);
+    }
+  }
+
+  async function saveCurrentSearch() {
+    const name = query.trim() || activeFilters.map((filter) => filter.label).slice(0, 3).join("・") || "条件なしの検索";
+    try {
+      await api.saveSearch(name.slice(0, 48), query.trim(), draftPlan);
+      setSavedSearches(await api.recentSearches(20));
+      setNotice(`「${name.slice(0, 48)}」を保存しました。`);
+    } catch (error) {
+      setNotice(`検索条件を保存できませんでした: ${String(error)}`);
+    }
+  }
+
+  async function loadSavedSearch(id: string) {
+    const savedSearch = savedSearches.find((item) => item.id === id);
+    if (!savedSearch) return;
+    await runSearch({ ...emptyPlan(), ...savedSearch.plan }, 1);
+  }
+
+  function removeFilter(key: string) {
+    const [type, ...rest] = key.split(":");
+    const value = rest.join(":");
+    setPlan((current) => {
+      if (type === "prefecture") return { ...current, prefectures: current.prefectures.filter((item) => item !== value) };
+      if (type === "city") return { ...current, cities: current.cities.filter((item) => item !== value) };
+      if (type === "industry-code") return { ...current, industry_codes: current.industry_codes.filter((item) => item !== value) };
+      if (type === "industry-term") return { ...current, industry_terms: current.industry_terms.filter((item) => item !== value) };
+      if (type === "kind") return { ...current, company_kinds: current.company_kinds.filter((item) => item !== value) };
+      if (type === "keyword-any") return { ...current, keyword_any: current.keyword_any.filter((item) => item !== value) };
+      if (type === "keyword-all") return { ...current, keyword_all: current.keyword_all.filter((item) => item !== value) };
+      if (type === "employees") return { ...current, min_employees: null, max_employees: null };
+      if (type === "capital") return { ...current, min_capital: null, max_capital: null };
+      if (type === "established") return { ...current, established_from: null, established_to: null };
+      if (type === "website") return { ...current, website_required: null };
+      if (type === "phone") return { ...current, phone_required: null };
+      return current;
+    });
+  }
+
+  async function changeSort(field: SortField) {
+    const same = plan.sort_by === field;
+    const direction = same && plan.sort_direction === "asc" ? "desc" : "asc";
+    await runSearch({ ...draftPlan, sort_by: field, sort_direction: direction }, 1);
+  }
+
+  function togglePageSelection() {
+    setChecked((current) => {
+      const next = new Set(current);
+      if (allPageChecked) visibleRows.forEach((row) => next.delete(row.corporate_number));
+      else visibleRows.forEach((row) => next.add(row.corporate_number));
+      return next;
+    });
+  }
+
+  function toggleCompanySelection(corporateNumber: string) {
+    setChecked((current) => {
+      const next = new Set(current);
+      if (next.has(corporateNumber)) next.delete(corporateNumber);
+      else next.add(corporateNumber);
+      return next;
+    });
+  }
+
+  async function addToList(scope: "selected" | "all") {
+    if (!result) return;
+    if (scope === "selected" && checked.size === 0) return;
+    if (scope === "all" && hasUnappliedChanges) {
+      setNotice("変更した条件を検索へ適用してから、一致企業をリストへ追加してください。");
+      return;
+    }
+    setBusy("list");
+    try {
+      const count = scope === "selected"
+        ? await api.addToList(listName, Array.from(checked))
+        : await api.addSearchToList(listName, operationPlan);
+      setNotice(`「${listName}」に${fmt.format(count)}件を追加しました。`);
+    } catch (error) {
+      setNotice(`リストへ追加できませんでした: ${String(error)}`);
     } finally {
       setBusy(null);
     }
   }
 
-  async function extractWithLimit(limit: number) {
-    const targetPlan = { ...plan, limit };
-    setPlan(targetPlan);
-    await runSearch(1, targetPlan);
+  async function exportMatches(format: "csv" | "xlsx") {
+    if (hasUnappliedChanges) {
+      setNotice("変更した条件を検索へ適用してから、結果を出力してください。");
+      return;
+    }
+    const path = await save({
+      defaultPath: `queria-companies.${format}`,
+      filters: [{ name: format === "csv" ? "CSV" : "Excel", extensions: [format] }],
+    });
+    if (!path) return;
+    setBusy("export");
+    try {
+      const count = format === "csv" ? await api.exportCsv(operationPlan, path) : await api.exportXlsx(operationPlan, path);
+      setNotice(`検索条件に一致する${fmt.format(count)}件を${format.toUpperCase()}へ出力しました。`);
+    } catch (error) {
+      setNotice(`出力できませんでした: ${String(error)}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function openExternal(url?: string | null) {
+    if (!url) return;
+    try {
+      await openUrl(safeHttpUrl(url));
+    } catch (error) {
+      setNotice(`URLを開けませんでした: ${String(error)}`);
+    }
   }
 
   async function loginCodex() {
     setBusy("codex-login");
     try {
       const { auth_url } = await api.codexLogin();
-      await openUrl(auth_url);
-      setMessage("ブラウザでChatGPTログインを完了してください。完了後、この画面の状態を更新します。");
-      setTimeout(() => void refreshStatus(), 3500);
+      await openUrl(safeHttpUrl(auth_url));
+      setNotice("ブラウザでログインを完了してから、接続状態を更新してください。");
+      window.setTimeout(() => void refreshStatus(), 3500);
     } catch (error) {
-      setMessage(String(error));
+      setNotice(String(error));
     } finally {
       setBusy(null);
     }
@@ -243,456 +383,455 @@ function App() {
       await api.codexLogout();
       await refreshStatus();
     } catch (error) {
-      setMessage(String(error));
+      setNotice(String(error));
     } finally {
       setBusy(null);
     }
   }
 
   async function deepResearch() {
-    if (!selected) return;
+    if (!detail) return;
     setBusy("research");
     setResearch(null);
     setView("research");
     try {
       const report = await api.researchCompany(
-        selected,
-        "公式サイトと公開Web情報を優先し、事業内容・顧客・提供サービス・強み・想定される日本標準産業分類を調べる。根拠URLを残す。",
+        detail,
+        "公式サイトと公的な公開情報を優先し、事業内容・提供サービス・顧客・強み・日本標準産業分類を根拠URL付きで調べる。",
       );
       setResearch(report);
       await refreshStatus();
     } catch (error) {
-      setMessage(String(error));
+      setNotice(`企業調査を完了できませんでした: ${String(error)}`);
     } finally {
       setBusy(null);
     }
   }
 
   async function collectPhone() {
-    if (!selected) return;
+    if (!detail?.website) return;
     setBusy("phone");
     try {
-      const value = await api.collectCompanyPhone(selected);
-      if (value.phone) {
-        const best = value.candidates?.[0];
-        const patch = {
-          phone: value.phone,
-          phone_type: best?.phone_type ?? "unclassified",
-          phone_source_url: best?.source_url ?? value.source_url,
-          phone_confidence: best?.confidence ?? null,
-          phone_evidence_text: best?.evidence_text ?? null,
-          phone_observed_at: best?.observed_at ?? null,
-          phone_status: "official_site_candidate",
-        };
-        setSelected({ ...selected, ...patch });
-        setResult((current) => current ? { ...current, rows: current.rows.map((row) => row.corporate_number === selected.corporate_number ? { ...row, ...patch } : row) } : current);
-        setMessage(`公式サイトから電話番号 ${value.phone} を取得しました（候補${value.candidates?.length ?? 1}件）。`);
-      } else {
-        setMessage("公式サイトから電話番号を確認できませんでした。");
+      const value = await api.collectCompanyPhone(detail);
+      if (!value.phone) {
+        setNotice("公式サイトで公開電話番号を確認できませんでした。");
+        return;
       }
+      const updated = { ...detail, phone: value.phone };
+      setDetail(updated);
+      setResult((current) => current ? {
+        ...current,
+        rows: current.rows.map((row) => row.corporate_number === detail.corporate_number ? updated : row),
+      } : current);
+      setNotice(`公式サイトから電話番号 ${value.phone} を取得しました。`);
     } catch (error) {
-      setMessage(String(error));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function exportCsv() {
-    const path = await save({ defaultPath: "company-list.csv", filters: [{ name: "CSV", extensions: ["csv"] }] });
-    if (!path) return;
-    setBusy("export");
-    try {
-      const count = await api.exportCsv(plan, path);
-      setMessage(`${fmt.format(count)}件をCSVに出力しました。`);
-    } catch (error) {
-      setMessage(String(error));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function exportXlsx() {
-    const path = await save({ defaultPath: "company-list.xlsx", filters: [{ name: "Excel", extensions: ["xlsx"] }] });
-    if (!path) return;
-    setBusy("export");
-    try {
-      const count = await api.exportXlsx(plan, path);
-      setMessage(`${fmt.format(count)}件をExcel（XLSX）に出力しました。`);
-    } catch (error) {
-      setMessage(String(error));
+      setNotice(`電話番号を取得できませんでした: ${String(error)}`);
     } finally {
       setBusy(null);
     }
   }
 
   async function importCompanies() {
-    const file = await open({ multiple: false, filters: [{ name: "DuckDB / Company data", extensions: ["duckdb", "db", "parquet", "csv", "json", "jsonl"] }] });
+    const file = await open({ multiple: false, filters: [{ name: "Company data", extensions: ["duckdb", "db", "parquet", "csv", "json", "jsonl"] }] });
     if (!file || Array.isArray(file)) return;
     setBusy("import");
     try {
       const count = await api.importFile(file);
-      setMessage(`${fmt.format(count)}件を取り込みました。`);
+      setNotice(`${fmt.format(count)}件を取り込みました。`);
       await refreshStatus();
     } catch (error) {
-      setMessage(String(error));
+      setNotice(String(error));
     } finally {
       setBusy(null);
     }
   }
 
   async function syncDuckDb() {
-    setBusy("duckdb");
+    setBusy("sync");
     try {
       const value = await api.syncDuckDb();
-      setMessage(`${fmt.format(value.imported)}件をDuckDBネイティブ同期しました（${value.duckdb_version}）。`);
+      setNotice(`${fmt.format(value.imported)}件を同期しました（DuckDB ${value.duckdb_version}）。`);
       await refreshStatus();
     } catch (error) {
-      setMessage(String(error));
+      setNotice(String(error));
     } finally {
       setBusy(null);
     }
   }
 
-  async function addSearchResultsToList() {
-    if (!result?.rows.length) return;
-    setBusy("list");
-    try {
-      const count = await api.addSearchToList(listName, plan);
-      setMessage(`${listName} に検索結果から ${fmt.format(count)}件追加しました。`);
-    } catch (error) {
-      setMessage(String(error));
-    } finally {
-      setBusy(null);
-    }
+  function salesforceMapping(): SalesforceFieldMapping[] {
+    return sfMappingText.split(/\r?\n/).map((line) => {
+      const [source, ...target] = line.split("=");
+      return { source: source?.trim(), target: target.join("=").trim() };
+    }).filter((field) => field.source && field.target);
   }
 
-  async function sendListToSalesforce() {
-    if (!salesforce?.connected) return;
-    setBusy("salesforce-upsert");
-    try {
-      const mapping: SalesforceFieldMapping[] = sfMappingText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-        const [source, ...targetParts] = line.split("=");
-        return { source: source.trim(), target: targetParts.join("=").trim() };
-      }).filter((field) => field.source && field.target);
-      await api.addSearchToList(listName, plan);
-      const value = await api.salesforceUpsertList(listName, sfObjectName, sfExternalId, mapping);
-      setSalesforceJob({ job_id: value.job_id, state: "UploadComplete", number_records_processed: 0, number_records_failed: 0, number_records_total: value.accepted, error_message: null });
-      setMessage(`${fmt.format(value.accepted)}件をSalesforceへ送信しました。Bulk Job: ${value.job_id}`);
-      void pollSalesforceJob(value.job_id);
-    } catch (error) {
-      setMessage(String(error));
-    } finally {
-      setBusy(null);
+  async function sendToSalesforce() {
+    if (!salesforce?.connected || !result) return;
+    if (checked.size === 0 && hasUnappliedChanges) {
+      setNotice("変更した条件を検索へ適用してから、一致企業をSalesforceへ送信してください。");
+      return;
     }
-  }
-
-  async function pollSalesforceJob(jobId: string) {
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      try {
-        const status = await api.salesforceJobStatus(jobId);
-        setSalesforceJob(status);
-        if (["JobComplete", "Failed", "Aborted"].includes(status.state)) return;
-      } catch {
-        return;
-      }
-    }
-  }
-
-  async function refreshSalesforceJob() {
-    if (!salesforceJob) return;
+    const snapshotName = `${listName}-${new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14)}`;
+    setBusy("salesforce");
     try {
-      const status = await api.salesforceJobStatus(salesforceJob.job_id);
-      setSalesforceJob(status);
-      setMessage(`Salesforceジョブ ${status.state}: 成功処理 ${fmt.format(status.number_records_processed)}件、失敗 ${fmt.format(status.number_records_failed)}件`);
+      if (checked.size) await api.addToList(snapshotName, Array.from(checked));
+      else await api.addSearchToList(snapshotName, operationPlan);
+      const response = await api.salesforceUpsertList(snapshotName, sfObjectName, sfExternalId, salesforceMapping());
+      setSalesforceJob({
+        job_id: response.job_id,
+        state: "UploadComplete",
+        number_records_processed: 0,
+        number_records_failed: 0,
+        number_records_total: response.accepted,
+        error_message: null,
+      });
+      setNotice(`${checked.size ? "選択した" : "検索条件に一致する"}${fmt.format(response.accepted)}件をSalesforceへ送信しました。`);
     } catch (error) {
-      setMessage(String(error));
-    }
-  }
-
-  async function retrySalesforceFailed() {
-    if (!salesforceJob) return;
-    setBusy("salesforce-retry");
-    try {
-      const value = await api.salesforceRetryFailed(salesforceJob.job_id);
-      setSalesforceJob({ job_id: value.job_id, state: "UploadComplete", number_records_processed: 0, number_records_failed: 0, number_records_total: value.accepted, error_message: null });
-      setMessage(`失敗行を${fmt.format(value.accepted)}件再送しました。Bulk Job: ${value.job_id}`);
-    } catch (error) {
-      setMessage(String(error));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function importTaxonomy() {
-    const file = await open({ multiple: false, filters: [{ name: "Normalized JSIC", extensions: ["csv", "parquet"] }] });
-    if (!file || Array.isArray(file)) return;
-    setBusy("taxonomy");
-    try {
-      const count = await api.importTaxonomy(file);
-      setMessage(`産業分類 ${fmt.format(count)}件を取り込みました。`);
-      await refreshStatus();
-    } catch (error) {
-      setMessage(String(error));
+      setNotice(`Salesforceへ送信できませんでした: ${String(error)}`);
     } finally {
       setBusy(null);
     }
   }
 
   return (
-    <div className="shell">
-      <aside className="sidebar">
+    <div className={`app-shell ${mobileNavOpen ? "nav-open" : ""}`}>
+      <aside className="app-sidebar" aria-label="メインナビゲーション">
         <div className="brand">
-          <div className="brand-mark"><Building2 size={19} /></div>
-          <div><strong>CompanyMaster G</strong><span>情報通信業（37〜41）完全版</span></div>
+          <span className="brand-mark"><Building2 size={20} /></span>
+          <span><strong>CompanyMaster G</strong><small>情報通信業 37〜41</small></span>
         </div>
         <nav>
-          <button className={view === "search" ? "active" : ""} onClick={() => setView("search")}><Search size={17} />検索</button>
-          <button className={view === "ai" ? "active" : ""} onClick={() => setView("ai")}><Bot size={17} />AI検索</button>
-          <button className={view === "research" ? "active" : ""} onClick={() => setView("research")}><FileSearch size={17} />企業調査</button>
-          <button className={view === "connections" ? "active" : ""} onClick={() => setView("connections")}><Settings2 size={17} />接続</button>
+          <button className={view === "search" ? "active" : ""} onClick={() => { setView("search"); setMobileNavOpen(false); }}><Search size={18} />企業検索</button>
+          <button className={view === "research" ? "active" : ""} onClick={() => { setView("research"); setMobileNavOpen(false); }}><FileSearch size={18} />企業調査</button>
+          <button className={view === "connections" ? "active" : ""} onClick={() => { setView("connections"); setMobileNavOpen(false); }}><Settings2 size={18} />データと接続</button>
         </nav>
-        <div className="sidebar-stats">
-          <div><span>企業</span><strong>{data ? fmt.format(data.company_count) : "-"}</strong></div>
-          <div><span>業種収録</span><strong>{data ? fmt.format(data.industry_count) : "-"}</strong></div>
-          <div><span>調査メモ</span><strong>{data ? fmt.format(data.research_count) : "-"}</strong></div>
-          {data && <small className="coverage-note">入力状況　住所 {fmt.format(data.address_count)}<br />従業員 {fmt.format(data.employee_count)}　Web {fmt.format(data.website_count)}<br />電話 {fmt.format(data.phone_count)}（公式公開データ内）</small>}
+        <div className="sidebar-summary">
+          <span>収録企業</span>
+          <strong>{data ? fmt.format(data.company_count) : "—"}</strong>
+          <small>{data?.runtime_attached ? "統合ランタイム接続中" : "ローカルデータ"}</small>
         </div>
-        <div className="model-lock"><Sparkles size={14} /><div><span>LLM固定</span><strong>GPT-5.6 Luna</strong></div></div>
+        <div className="sidebar-health">
+          <span className={`health-dot ${data?.search_index_available ? "ok" : ""}`} />
+          <span><strong>{data?.search_index_available ? "高速索引 利用可能" : "DuckDB検索"}</strong><small>{data?.search_index_status ?? "状態を確認中"}</small></span>
+        </div>
       </aside>
 
-      <main className="main">
-        <header className="topbar">
-          <div className="top-status">
-            <span className={codex?.authenticated ? "dot ok" : "dot"} />
-            {codex?.authenticated ? codex.email ?? "ChatGPTログイン済み" : "ChatGPT未ログイン"}
-            {codex?.authenticated && !codex.luna_available && <span className="warning-pill">Luna利用不可</span>}
+      <main className="app-main">
+        <header className="app-topbar">
+          <button className="icon-button mobile-menu" aria-label="メニューを開く" onClick={() => setMobileNavOpen((openState) => !openState)}><Menu size={20} /></button>
+          <div className="topbar-title">
+            <strong>{view === "search" ? "企業検索" : view === "research" ? "企業調査" : "データと接続"}</strong>
+            {view === "search" && result && <span>{fmt.format(result.total)}件・{result.elapsed_ms}ms・{result.engine || "DuckDB"}</span>}
           </div>
-          {codex?.authenticated ? (
-            <button className="ghost small" onClick={logoutCodex} disabled={busy === "codex-logout"}><LogOut size={15} />ログアウト</button>
-          ) : (
-            <button className="primary small" onClick={loginCodex} disabled={busy === "codex-login"}><LogIn size={15} />ChatGPTでログイン</button>
-          )}
+          <div className="topbar-actions">
+            <span className={`connection-pill ${codex?.authenticated ? "connected" : ""}`}><span />{codex?.authenticated ? "ChatGPT 接続済み" : "ChatGPT 未接続"}</span>
+            <button className="button quiet" onClick={() => void refreshStatus()}><RefreshCw size={16} />状態を更新</button>
+          </div>
         </header>
 
-        {message && <div className="notice"><span>{message}</span><button onClick={() => setMessage("")}><X size={15} /></button></div>}
+        {notice && <div className="notice" role="status" aria-live="polite"><span>{notice}</span><button aria-label="通知を閉じる" onClick={() => setNotice("")}><X size={16} /></button></div>}
 
         {view === "search" && (
-          <section className="workspace">
-            <div className="search-mode-header">
-              <div className="search-heading"><span className="eyebrow"><Settings2 size={14} /> 項目検索</span><h1>企業検索</h1><p>条件を選択して、必要な企業だけを正確に絞り込みます。</p></div>
-              <span className="field-mode-badge"><Settings2 size={13} /> 選択式フィルター</span>
+          <section className="search-workbench">
+            <div className="search-command">
+              <form onSubmit={(event) => { event.preventDefault(); void directSearch(); }} className="global-search" role="search">
+                <Search size={20} aria-hidden="true" />
+                <label className="sr-only" htmlFor="global-query">企業名、法人番号、住所、電話番号、URLを検索</label>
+                <input id="global-query" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="企業名・法人番号・住所・電話番号・URLを横断検索" autoComplete="off" />
+                {query && <button type="button" className="clear-query" aria-label="検索語を消去" onClick={() => setQuery("")}><X size={16} /></button>}
+                <button type="submit" className="button primary" disabled={busy === "search"}>{busy === "search" ? <Loader2 className="spin" size={17} /> : <Search size={17} />}検索</button>
+              </form>
+              <div className="command-actions">
+                <button className={`button ${aiOpen ? "selected" : "quiet"}`} onClick={() => setAiOpen((openState) => !openState)}><Sparkles size={17} />文章で条件指定</button>
+                <select aria-label="保存した検索" defaultValue="" onChange={(event) => { void loadSavedSearch(event.target.value); event.currentTarget.value = ""; }}>
+                  <option value="">保存した検索</option>
+                  {savedSearches.map((savedSearch) => <option key={savedSearch.id} value={savedSearch.id}>{savedSearch.name}</option>)}
+                </select>
+                <button className="button quiet" onClick={() => void saveCurrentSearch()} disabled={!result}><Check size={17} />条件を保存</button>
+              </div>
             </div>
 
-            <div className="hero-search field-search-card">
-              <div className="field-search-intro"><div><strong>項目を選んで検索</strong><span>カテゴリを切り替えて選択できます。画面全体を縦にスクロールする必要はありません。</span></div></div>
-              <div className="chips field-summary"><span className="filter-label"><Filter size={14} />選択中</span>{filters.length ? filters.map((f) => <span className="chip" key={f}>{f}</span>) : <span className="muted">条件なし（全国・全業種）</span>}<button className="ghost tiny" onClick={() => runSearch(1)} disabled={!!busy}><RefreshCw size={13} />再検索</button></div>
-
-              <div className="condition-panel">
-                <div className="condition-panel-head">
-                  <div><span className="condition-title"><Settings2 size={14}/> 条件を選んで絞り込み</span><small>クリックで複数選択。条件は検索ボタンを押すまで適用されません。</small></div>
-                  <button className="ghost tiny" onClick={() => setPlan({ ...blankPlan })} disabled={!!busy}>条件をクリア</button>
+            {aiOpen && (
+              <div className="ai-condition" role="region" aria-label="文章による検索条件の作成">
+                <span className="ai-icon"><Bot size={20} /></span>
+                <div>
+                  <strong>探したい企業をそのまま書く</strong>
+                  <small>AIが文章を検索条件へ変換します。実行前後に左の条件欄で確認・修正できます。</small>
                 </div>
-                <div className="field-category-tabs" role="tablist" aria-label="項目検索カテゴリ">
-                  {([['region', '地域'], ['industry', '業種'], ['organization', '法人種別'], ['scale', '規模・設立'], ['keywords', 'キーワード']] as const).map(([id, label]) => <button key={id} className={fieldCategory === id ? "active" : ""} onClick={() => setFieldCategory(id)} role="tab" aria-selected={fieldCategory === id}>{label}{id === "region" && plan.prefectures.length > 0 && <b>{plan.prefectures.length}</b>}{id === "industry" && (plan.industry_codes.length + plan.industry_terms.length) > 0 && <b>{plan.industry_codes.length + plan.industry_terms.length}</b>}{id === "organization" && plan.company_kinds.length > 0 && <b>{plan.company_kinds.length}</b>}{id === "keywords" && (plan.keyword_any.length + plan.keyword_all.length) > 0 && <b>{plan.keyword_any.length + plan.keyword_all.length}</b>}</button>)}
-                </div>
-
-                {fieldCategory === "region" && <div className="condition-section">
-                  <div className="condition-section-head"><strong>地域</strong><span>{plan.prefectures.length ? `${plan.prefectures.length}都道府県` : "全国"}</span></div>
-                  <div className="option-grid prefecture-options">
-                    {prefectures.map((value) => <button key={value} className={`option-pill ${plan.prefectures.includes(value) ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, prefectures: toggleValue(p.prefectures, value) }))}>{value}</button>)}
-                  </div>
-                  <div className="condition-input-row"><label><span>市区町村（任意）</span><input value={plan.cities.join(", ")} onChange={(e) => setPlan((p) => ({ ...p, cities: splitValues(e.target.value) }))} placeholder="千代田区、横浜市" /></label></div>
-                </div>}
-
-                {fieldCategory === "industry" && <div className="condition-section">
-                  <div className="condition-section-head"><strong>業種</strong><span>大きな分類から選択できます</span></div>
-                  <div className="option-grid industry-options">
-                    {industryPresets.filter((preset) => preset.label === "情報通信業（G）").map((preset) => {
-                      const active = preset.codes.every((code) => plan.industry_codes.includes(code)) && preset.terms.every((term) => plan.industry_terms.includes(term));
-                      return <button key={preset.label} className={`option-pill ${active ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, industry_codes: active ? p.industry_codes.filter((code) => !preset.codes.includes(code)) : Array.from(new Set([...p.industry_codes, ...preset.codes])), industry_terms: active ? p.industry_terms.filter((term) => !preset.terms.includes(term)) : Array.from(new Set([...p.industry_terms, ...preset.terms])) }))}>{preset.label}</button>;
-                    })}
-                  </div>
-                  <div className="subsection-label">情報通信業の中分類（JSICコード）</div>
-                  <div className="option-grid middle-options">
-                    {industryMiddle.map((item) => <button key={item.code} className={`option-pill ${plan.industry_codes.includes(item.code) ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, industry_codes: toggleValue(p.industry_codes, item.code) }))}><b>{item.displayCode}</b>{item.label}</button>)}
-                  </div>
-                  <div className="condition-input-row two"><label><span>業種コード（小分類・細分類も可）</span><input value={plan.industry_codes.filter((code) => !industryMiddle.some((item) => item.code === code) && code !== "G").join(", ")} onChange={(e) => setPlan((p) => ({ ...p, industry_codes: ["G", ...industryMiddle.map((item) => item.code).filter((code) => p.industry_codes.includes(code)), ...splitValues(e.target.value)] }))} placeholder="例: 391 / G391 / 3911 / G3911" /></label><label><span>業種キーワード</span><input value={plan.industry_terms.join(", ")} onChange={(e) => setPlan((p) => ({ ...p, industry_terms: splitValues(e.target.value) }))} placeholder="SaaS、受託開発" /></label></div>
-                  <div className="taxonomy-note">G37〜G41の全小分類・細分類を公式JSICマスターから収録。`39`と`G39`、`391`と`G391`は同じ配下を検索します。企業件数0の分類もマスターには残しています。</div>
-                </div>}
-
-                {fieldCategory === "organization" && <div className="condition-section">
-                  <div className="condition-section-head"><strong>法人種別</strong><span>{plan.company_kinds.length ? `${plan.company_kinds.length}種類` : "指定なし"}</span></div>
-                  <div className="option-grid kind-options">{companyKinds.map((kind) => <button key={kind} className={`option-pill ${plan.company_kinds.includes(kind) ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, company_kinds: toggleValue(p.company_kinds, kind) }))}>{kind}</button>)}</div>
-                </div>}
-
-                {fieldCategory === "scale" && <div className="condition-section">
-                  <div className="condition-section-head"><strong>規模・設立</strong><span>よく使う範囲をワンクリック</span></div>
-                  <div className="range-group"><span className="range-label">従業員数</span><div className="range-options">{employeeRanges.map((range) => { const active = plan.min_employees === range.min && plan.max_employees === range.max; return <button key={range.label} className={`range-choice ${active ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, min_employees: range.min, max_employees: range.max }))}>{range.label}</button>; })}</div></div>
-                  <div className="range-group"><span className="range-label">資本金</span><div className="range-options">{capitalRanges.map((range) => { const active = plan.min_capital === range.min && plan.max_capital === range.max; return <button key={range.label} className={`range-choice ${active ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, min_capital: range.min, max_capital: range.max }))}>{range.label}</button>; })}</div></div>
-                  <div className="range-group"><span className="range-label">設立年</span><div className="range-options">{establishedRanges.map((range) => { const active = plan.established_from === range.from && plan.established_to === range.to; return <button key={range.label} className={`range-choice ${active ? "active" : ""}`} onClick={() => setPlan((p) => ({ ...p, established_from: range.from, established_to: range.to }))}>{range.label}</button>; })}</div></div>
-                  <div className="condition-input-row three"><label><span>従業員 最小</span><input type="number" min={0} value={plan.min_employees ?? ""} onChange={(e) => setPlan((p) => ({ ...p, min_employees: optionalNumber(e.target.value) }))} /></label><label><span>従業員 最大</span><input type="number" min={0} value={plan.max_employees ?? ""} onChange={(e) => setPlan((p) => ({ ...p, max_employees: optionalNumber(e.target.value) }))} /></label><label><span>Webサイト</span><select value={plan.website_required == null ? "any" : plan.website_required ? "yes" : "no"} onChange={(e) => setPlan((p) => ({ ...p, website_required: e.target.value === "any" ? undefined : e.target.value === "yes" }))}><option value="any">指定なし</option><option value="yes">あり</option><option value="no">なし</option></select></label></div>
-                </div>}
-
-                {fieldCategory === "keywords" && <div className="condition-section compact-section">
-                  <div className="condition-input-row two"><label><span>キーワード（いずれかを含む）</span><input value={plan.keyword_any.join(", ")} onChange={(e) => setPlan((p) => ({ ...p, keyword_any: splitValues(e.target.value) }))} placeholder="SaaS、クラウド、食品" /></label><label><span>キーワード（すべてを含む）</span><input value={plan.keyword_all.join(", ")} onChange={(e) => setPlan((p) => ({ ...p, keyword_all: splitValues(e.target.value) }))} placeholder="自社開発、法人向け" /></label></div>
-                  <div className="condition-input-row limit-row"><label><span>最大抽出件数</span><input type="number" min={1} max={maxSearchLimit} value={plan.limit} onChange={(e) => setPlan((p) => ({ ...p, limit: Math.max(1, Math.min(maxSearchLimit, Number(e.target.value) || 1)) }))} /></label><span className="condition-help">全件抽出は現在の全量スナップショット（最大1,000万社）まで取得します。業種コードは公式JSIC形式で判定します。</span></div>
-                </div>}
-                <div className="condition-actions"><span>{filters.length ? `${filters.length}個の条件を選択中` : "条件なし（全国・全業種）"}</span><button className="primary" onClick={() => runSearch(1)} disabled={!!busy}><Search size={15} />この条件で検索</button></div>
+                <textarea value={aiPrompt} onChange={(event) => setAiPrompt(event.target.value)} placeholder="例：神奈川県の情報サービス企業。従業員50名以上で、公式サイトと電話番号がある会社" rows={2} />
+                <button className="button primary" disabled={!aiPrompt.trim() || busy === "plan"} onClick={() => void aiSearch()}>{busy === "plan" ? <Loader2 className="spin" size={17} /> : <Sparkles size={17} />}条件を作成して検索</button>
               </div>
+            )}
+
+            <div className="active-filter-bar">
+              <button className="button filter-toggle" onClick={() => setFilterOpen((openState) => !openState)} aria-expanded={filterOpen}><Filter size={17} />絞り込み{activeFilters.length > 0 && <b>{activeFilters.length}</b>}</button>
+              <div className="filter-chips">
+                {activeFilters.length === 0 ? <span>全国・全業種</span> : activeFilters.map((filter) => (
+                  <button key={filter.key} className="filter-chip" onClick={() => removeFilter(filter.key)}>{filter.label}<X size={14} /></button>
+                ))}
+              </div>
+              {hasUnappliedChanges && <span className="unapplied-pill">未適用の変更</span>}
+              {activeFilters.length > 0 && <button className="text-button" onClick={() => setPlan((current) => ({ ...emptyPlan(), text: current.text }))}>絞り込みをクリア</button>}
             </div>
 
-            <div className="toolbar">
-              <div className="result-title">
-                <strong>{result ? `${fmt.format(result.total)}社` : "企業を検索"}</strong>
-                {result && <span>{result.elapsed_ms} ms</span>}
-              </div>
-              <div className="toolbar-actions">
-                <input value={listName} onChange={(e) => setListName(e.target.value)} className="list-name" aria-label="リスト名" />
-                <button className="ghost" onClick={() => void extractWithLimit(30000)} disabled={!!busy}><Search size={15} />30,000件抽出</button>
-                <button className="ghost" onClick={() => void extractWithLimit(maxSearchLimit)} disabled={!!busy}><Search size={15} />全件抽出</button>
-                <button className="ghost" onClick={addSearchResultsToList} disabled={!result?.rows.length || !!busy}><ListPlus size={15} />検索結果をリストへ</button>
-                <button className="ghost" onClick={exportCsv} disabled={!result || !!busy}><Download size={15} />CSV</button>
-                <button className="ghost" onClick={exportXlsx} disabled={!result || !!busy}><Download size={15} />Excel</button>
-                <button className="primary" onClick={sendListToSalesforce} disabled={!result?.rows.length || !salesforce?.connected || !!busy}><Send size={15} />Salesforce</button>
-              </div>
-            </div>
+            <div className={`workbench-grid ${filterOpen ? "with-filters" : ""}`}>
+              {filterOpen && (
+                <>
+                  <button className="filter-scrim" aria-label="絞り込みを閉じる" onClick={() => setFilterOpen(false)} />
+                  <FilterPanel plan={plan} setPlan={setPlan} onApply={(nextPlan) => void runSearch({ ...nextPlan, text: query.trim() || null }, 1)} busy={busy === "search"} onClose={() => setFilterOpen(false)} />
+                </>
+              )}
 
-            <div className="content-grid">
-              <div className="table-card">
-                <div className="result-table" role="table">
-                  <div className="result-grid result-header" role="row"><span>会社 / FUMA</span><span>所在地</span><span>業種</span><span>従業員</span><span>資本金</span><span>電話</span><span>Web</span></div>
-                  {displayRows.length ? <div className="result-scroll" ref={listScrollRef} onScroll={(e) => setListScrollTop(e.currentTarget.scrollTop)}>
-                    <div className="virtual-canvas" style={{ height: `${displayRows.length * virtualRowHeight}px` }}>
-                      <div className="virtual-rows" style={{ transform: `translateY(${virtualStart * virtualRowHeight}px)` }}>
-                        {virtualRows.map((company) => <div key={company.corporate_number} className={`result-grid result-row ${selected?.corporate_number === company.corporate_number ? "selected" : ""}`} role="row" onClick={() => setSelected(company)}>
-                          <span><strong>{company.name}</strong><small>{company.corporate_number}{company.fuma_id ? ` ・ FUMA ${company.fuma_id}` : ""}</small></span>
-                          <span>{[company.prefecture, company.city].filter(Boolean).join(" ") || "-"}</span>
-                          <span><span>{company.industry_name || company.inferred_industry_name || "-"}</span>{company.inferred_industry_name && !company.industry_name && <small className="inferred">AI推定</small>}</span>
-                          <span>{company.employees != null ? fmt.format(company.employees) : "-"}</span>
-                          <span>{compactNumber(company.capital)}</span>
-                          <span>{company.phone || "-"}</span>
-                          <span>{company.website ? <a href={company.website} onClick={(e) => { e.stopPropagation(); void openUrl(company.website!); }}><ExternalLink size={15} /></a> : "-"}</span>
-                        </div>)}
-                      </div>
+              <div className="results-panel">
+                <div className="results-toolbar">
+                  <div>
+                    <strong>{result ? `${fmt.format(result.total)}件` : "検索結果"}</strong>
+                    <span>{result ? `1ページ${currentPageSize}件・${result.elapsed_ms}ms` : "条件を指定して企業を検索します"}</span>
+                  </div>
+                  <div className="selection-actions">
+                    <input value={listName} onChange={(event) => setListName(event.target.value)} aria-label="リスト名" />
+                    {checked.size > 0 ? (
+                      <button className="button secondary" onClick={() => void addToList("selected")} disabled={busy === "list"}><ListPlus size={16} />選択した{checked.size}社を追加</button>
+                    ) : (
+                      <button className="button secondary" onClick={() => void addToList("all")} disabled={!result || busy === "list" || hasUnappliedChanges} title={hasUnappliedChanges ? "変更した条件を先に検索してください" : "画面に適用済みの条件を使用します"}><ListPlus size={16} />一致企業を追加（上限{fmt.format(operationPlan.limit)}件）</button>
+                    )}
+                    <div className="export-group" aria-label="検索結果を出力">
+                      <button className="button quiet" onClick={() => void exportMatches("csv")} disabled={!result || busy === "export" || hasUnappliedChanges} title={hasUnappliedChanges ? "変更した条件を先に検索してください" : undefined}><Download size={16} />CSV</button>
+                      <button className="button quiet" onClick={() => void exportMatches("xlsx")} disabled={!result || busy === "export" || hasUnappliedChanges} title={hasUnappliedChanges ? "変更した条件を先に検索してください" : undefined}>Excel</button>
                     </div>
-                  </div> : <div className="empty">自然文で条件を書き、Lunaに相談すると検索条件を作って抽出します。</div>}
-                  {displayRows.length > 0 && <div className="result-footnote">{fmt.format(displayRows.length)}件を読み込み済み・スクロールは仮想描画で高速表示</div>}
-                </div>
-                {result && result.total > result.page_size && (
-                  <div className="pager">
-                    <button onClick={() => runSearch(Math.max(1, page - 1))} disabled={page <= 1 || !!busy}><ChevronLeft size={16} /></button>
-                    <span>{page} / {Math.ceil(result.total / result.page_size)}</span>
-                    <button onClick={() => runSearch(page + 1)} disabled={page >= Math.ceil(result.total / result.page_size) || !!busy}><ChevronRight size={16} /></button>
                   </div>
-                )}
+                </div>
+
+                <div className="table-wrap" aria-busy={busy === "search"}>
+                  <table>
+                    <caption className="sr-only">企業検索結果。各行を選ぶと詳細が開きます。</caption>
+                    <thead>
+                      <tr>
+                        <th className="check-column"><input ref={pageCheckboxRef} type="checkbox" aria-label="このページをすべて選択" checked={allPageChecked} onChange={togglePageSelection} /></th>
+                        <SortableHeader label="企業名" field="name" plan={plan} onSort={changeSort} />
+                        <th>所在地</th>
+                        <th>業種</th>
+                        <SortableHeader label="従業員" field="employees" plan={plan} onSort={changeSort} />
+                        <SortableHeader label="資本金" field="capital" plan={plan} onSort={changeSort} />
+                        <th>連絡先</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {busy === "search" && !result ? <LoadingRows /> : visibleRows.map((company) => (
+                        <tr key={company.corporate_number} className={detail?.corporate_number === company.corporate_number ? "active" : ""} onClick={() => setDetail(company)}>
+                          <td className="check-column" onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`${company.name}を選択`} checked={checked.has(company.corporate_number)} onChange={() => toggleCompanySelection(company.corporate_number)} /></td>
+                          <td><button className="company-button" onClick={() => setDetail(company)}><strong>{company.name}</strong><small>{company.corporate_number}・{formatKind(company.kind)}</small></button></td>
+                          <td><span>{company.prefecture || "—"} {company.city || ""}</span><small title={company.address ?? undefined}>{company.address || "住所情報なし"}</small></td>
+                          <td><span>{company.industry_name || company.inferred_industry_name || "—"}</span>{company.inferred_industry_name && !company.industry_name && <small className="ai-label">AI推定 {Math.round((company.inferred_industry_confidence ?? 0) * 100)}%</small>}</td>
+                          <td className="number-cell">{company.employees == null ? "—" : `${fmt.format(company.employees)}名`}</td>
+                          <td className="number-cell">{compactNumber(company.capital)}</td>
+                          <td><div className="contact-status"><span className={company.website ? "available" : ""}>Web</span><span className={company.phone ? "available" : ""}>電話</span></div></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {!busy && !result && <EmptyState icon={<Search size={30} />} title="企業を検索してみましょう" text="企業名・法人番号なら上の検索欄へ、営業リストなら左の絞り込みへ入力します。" />}
+                  {!busy && result && visibleRows.length === 0 && <EmptyState icon={<Filter size={30} />} title="一致する企業がありません" text="条件を1つずつ外すか、表記を短くして再検索してください。" />}
+                  {busy === "search" && result && <div className="table-loading"><Loader2 className="spin" size={20} />検索中…</div>}
+                </div>
+
+                <div className="pagination" aria-label="検索結果のページ移動">
+                  <span>{result ? `${fmt.format(Math.min((currentPage - 1) * currentPageSize + 1, result.total))}–${fmt.format(Math.min(currentPage * currentPageSize, result.total))} / ${fmt.format(result.total)}` : "0件"}</span>
+                  <div>
+                    <button className="icon-button" aria-label="前のページ" title={hasUnappliedChanges ? "変更した条件を先に検索してください" : undefined} disabled={!result || currentPage <= 1 || busy === "search" || hasUnappliedChanges} onClick={() => void runSearch(operationPlan, currentPage - 1)}><ChevronLeft size={18} /></button>
+                    <span>{result ? `${currentPage} / ${totalPages}` : "—"}</span>
+                    <button className="icon-button" aria-label="次のページ" title={hasUnappliedChanges ? "変更した条件を先に検索してください" : undefined} disabled={!result || currentPage >= totalPages || busy === "search" || hasUnappliedChanges} onClick={() => void runSearch(operationPlan, currentPage + 1)}><ChevronRight size={18} /></button>
+                  </div>
+                </div>
               </div>
 
-              <aside className="inspector">
-                {selected ? <>
-                  <div className="inspector-head"><div><span className="kicker">企業詳細</span><h2>{selected.name}</h2></div>{selected.website && <button className="icon-btn" onClick={() => void openUrl(selected.website!)}><ExternalLink size={17} /></button>}</div>
-                  <dl>
-                    <div><dt>法人番号 / Entity Key</dt><dd>{selected.corporate_number}</dd></div>
-                    <div><dt>FUMA_ID</dt><dd>{selected.fuma_id || "-"}</dd></div>
-                    <div><dt>データソース</dt><dd>{selected.source_kind || "-"}</dd></div>
-                    <div><dt>所在地</dt><dd>{selected.address || [selected.prefecture, selected.city].filter(Boolean).join(" ") || "-"}</dd></div>
-                    <div><dt>中分類</dt><dd>{selected.industry_middle_name || "-"}{selected.industry_middle_code ? ` (${selected.industry_middle_code})` : ""}</dd></div>
-                    <div><dt>小分類</dt><dd>{selected.industry_small_name || "-"}{selected.industry_small_code ? ` (${selected.industry_small_code})` : ""}</dd></div>
-                    <div><dt>細分類</dt><dd>{selected.industry_detail_name || selected.industry_name || "-"}{selected.industry_detail_code ? ` (${selected.industry_detail_code})` : ""}</dd></div>
-                    <div><dt>従業員</dt><dd>{selected.employees != null ? `${fmt.format(selected.employees)}名` : "-"}</dd></div>
-                    <div><dt>資本金</dt><dd>{selected.capital != null ? `${fmt.format(selected.capital)}円` : "-"}</dd></div>
-                    <div><dt>設立年</dt><dd>{selected.established_year ?? "-"}</dd></div>
-                    <div><dt>電話</dt><dd>{selected.phone || "-"}</dd></div>
-                    <div><dt>電話用途</dt><dd>{selected.phone_type || "-"}</dd></div>
-                    <div><dt>電話根拠URL</dt><dd>{selected.phone_source_url ? <a href={selected.phone_source_url} onClick={(e) => { e.preventDefault(); void openUrl(selected.phone_source_url!); }}>{selected.phone_source_url}</a> : "-"}</dd></div>
-                    <div><dt>電話状態</dt><dd>{selected.phone_status || "-"}</dd></div>
-                  </dl>
-                  {selected.business_summary && <p className="summary">{selected.business_summary}</p>}
-                  <button className="primary full" onClick={deepResearch} disabled={busy === "research" || !codex?.authenticated || !codex?.luna_available}>
-                    {busy === "research" ? <Loader2 className="spin" size={16} /> : <Sparkles size={16} />} Webまで深掘り
-                  </button>
-                  <button className="ghost full" onClick={collectPhone} disabled={busy === "phone" || !selected.website}>
-                    {busy === "phone" ? <Loader2 className="spin" size={16} /> : <Search size={16} />} 公式サイトから電話番号を取得
-                  </button>
-                </> : <div className="empty-inspector"><Building2 size={30} /><span>会社を選択</span></div>}
-              </aside>
+              <DetailPanel company={detail} busy={busy} engine={result?.engine} onClose={() => setDetail(null)} onOpenUrl={openExternal} onResearch={deepResearch} onCollectPhone={collectPhone} />
             </div>
-          </section>
-        )}
-
-        {view === "ai" && (
-          <section className="workspace ai-view">
-            <div className="section-title"><div><span className="eyebrow"><Bot size={15} /> Luna AI Search</span><h1>AI検索</h1><p className="view-subtitle">自然文で条件を相談し、構造化した条件で企業を探します。</p></div><span className="luna-badge"><Sparkles size={12} />GPT-5.6 Luna固定</span></div>
-            <div className="research-ai-card ai-page-card">
-              <div className="research-ai-head"><div><strong>探したい企業を自然文で入力</strong><small>例：「東京都の情報通信業で、従業員50名以上、Webサイトあり」</small></div></div>
-              <div className="prompt-row">
-                <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="例：東京都の情報通信業で、従業員50名以上、Webサイトあり" />
-                <button className="send" onClick={consultAndSearch} disabled={!!busy || !codex?.authenticated || !codex?.luna_available} title="Lunaで検索">
-                  {busy === "plan" ? <Loader2 className="spin" size={20} /> : <Send size={20} />}
-                </button>
-              </div>
-              <div className="ai-examples"><span>例から始める</span><button onClick={() => setPrompt("東京都の情報通信業で、従業員50名以上、Webサイトあり")}>東京のIT企業</button><button onClick={() => setPrompt("製造業で、従業員100〜500名、Webサイトあり")}>中堅メーカー</button><button onClick={() => setPrompt("法人向けSaaSを提供する会社")}>法人向けSaaS</button></div>
-              <div className="memory-row"><span className="memory-label">検索メモリー</span><select value="" onChange={(e) => { const item = savedSearches.find((v) => v.id === e.target.value); if (!item) return; setPrompt(item.query); setPlan(item.plan); setView("search"); void runSearch(1, item.plan); }}><option value="">過去の検索を呼び出す</option>{savedSearches.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><span className="muted">{savedSearches.length ? `${savedSearches.length}件` : "未保存"}</span></div>
-              <div className="ai-search-note"><Sparkles size={14} /><span>Lunaが条件をJSON化してから項目検索を実行します。検索結果は検索タブで30,000件まで高速表示できます。</span></div>
-            </div>
-            {!codex?.authenticated && <div className="ai-login-hint"><Bot size={20} /><div><strong>AI検索にはChatGPTログインが必要です</strong><span>右上のログインボタンから、このユーザー自身のアカウントで接続してください。</span></div></div>}
           </section>
         )}
 
         {view === "research" && (
-          <section className="workspace research-view">
-            <div className="section-title"><div><span className="eyebrow">企業調査</span><h1>{selected?.name ?? "会社を選択してください"}</h1></div>{selected && <button className="primary" onClick={deepResearch} disabled={busy === "research"}><Sparkles size={16} />再調査</button>}</div>
-            {busy === "research" && <div className="research-loading"><Loader2 className="spin" size={24} /><div><strong>公開Web情報を調査中</strong><span>公式サイトを優先して、根拠URL付きのメモを生成します。</span></div></div>}
-            {research ? <div className="research-grid">
-              <article className="report-card"><h3>調査サマリー</h3><p>{research.summary}</p><h3>主な発見</h3><ul>{research.findings.map((f, i) => <li key={i}>{f}</li>)}</ul>{research.industry_guess && <div className="industry-guess"><span>推定業種</span><strong>{research.industry_guess.name || research.industry_guess.code || "-"}</strong><small>信頼度 {Math.round((research.industry_guess.confidence ?? 0) * 100)}%</small></div>}</article>
-              <article className="report-card"><h3>根拠</h3><div className="sources">{research.sources.map((s, i) => <button key={i} onClick={() => void openUrl(s.url)}><ExternalLink size={14} /><span><strong>{s.title || s.url}</strong><small>{s.note}</small></span></button>)}</div><h3>トランスクリプト</h3><pre>{research.transcript}</pre></article>
-            </div> : !busy && <div className="blank-state"><FileSearch size={35} /><strong>調査結果はここに蓄積されます</strong><span>検索画面で会社を選び「Webまで深掘り」を実行してください。</span></div>}
+          <section className="page-section">
+            <PageHeading eyebrow="AIによる公開情報調査" title="企業調査" description="検索結果から企業を選び、公式サイトと公的情報を優先して調査します。" />
+            {busy === "research" && <EmptyState icon={<Loader2 className="spin" size={30} />} title="公開情報を調査中" text="根拠URLを確認しながらレポートを作成しています。" />}
+            {!busy && !research && <EmptyState icon={<FileSearch size={30} />} title="調査対象を選んでください" text="企業検索の右側にある「この企業を調査」から開始できます。" />}
+            {research && (
+              <div className="research-layout">
+                <article className="report-card">
+                  <div className="report-title"><span><small>調査対象</small><h2>{research.company_name}</h2></span><span className="status-badge ok"><CheckCircle2 size={14} />完了</span></div>
+                  <h3>要約</h3><p>{research.summary}</p>
+                  {research.industry_guess && <div className="industry-guess"><small>推定業種</small><strong>{research.industry_guess.code} {research.industry_guess.name}</strong><span>確信度 {Math.round((research.industry_guess.confidence ?? 0) * 100)}%</span><p>{research.industry_guess.rationale}</p></div>}
+                  <h3>確認できたこと</h3><ul>{research.findings.map((finding) => <li key={finding}>{finding}</li>)}</ul>
+                </article>
+                <aside className="report-card sources-card">
+                  <h3>根拠となる公開情報</h3>
+                  {research.sources.map((source) => <button key={source.url} onClick={() => void openExternal(source.url)}><ExternalLink size={16} /><span><strong>{source.title || source.url}</strong><small>{source.note || source.url}</small></span></button>)}
+                  <details><summary>調査ログ</summary><pre>{research.transcript}</pre></details>
+                </aside>
+              </div>
+            )}
           </section>
         )}
 
         {view === "connections" && (
-          <section className="workspace connections">
-            <div className="section-title"><div><span className="eyebrow">Connections</span><h1>データと外部サービス</h1></div><button className="ghost" onClick={refreshStatus}><RefreshCw size={15} />状態更新</button></div>
+          <section className="page-section">
+            <PageHeading eyebrow="データの鮮度と外部連携" title="データと接続" description="現在使われているデータ、検索索引、ChatGPT、Salesforceの状態を確認します。" />
             <div className="connection-grid">
-              <ConnectionCard icon={<Bot size={20} />} title="Codex App Server" status={codex?.authenticated ? "接続済み" : "未接続"} ok={!!codex?.authenticated} description="各ユーザーが自分のChatGPTアカウントでログイン。モデルはGPT-5.6 Lunaに固定。">
-                {codex?.authenticated ? <button className="ghost" onClick={logoutCodex}>ログアウト</button> : <button className="primary" onClick={loginCodex}>ChatGPTでログイン</button>}
+              <ConnectionCard icon={<Database size={21} />} title="企業マスター" status={data?.runtime_attached ? "統合ランタイム" : "ローカル"} ok={Boolean(data?.company_count)}>
+                <dl className="metric-list">
+                  <div><dt>企業</dt><dd>{data ? fmt.format(data.company_count) : "—"}</dd></div>
+                  <div><dt>住所あり</dt><dd>{data ? fmt.format(data.address_count) : "—"}</dd></div>
+                  <div><dt>Webあり</dt><dd>{data ? fmt.format(data.website_count) : "—"}</dd></div>
+                  <div><dt>電話あり</dt><dd>{data ? fmt.format(data.phone_count) : "—"}</dd></div>
+                </dl>
+                {data?.runtime_attached ? <p className="card-note">統合ランタイムは外部の生成処理で更新されます。この画面からの同期・上書きは行いません。</p> : <div className="card-actions"><button className="button secondary" disabled={busy === "sync"} onClick={() => void syncDuckDb()}><RefreshCw size={16} />DuckDBを同期</button><button className="button quiet" disabled={busy === "import"} onClick={() => void importCompanies()}><Upload size={16} />ファイル取込</button></div>}
               </ConnectionCard>
-              <ConnectionCard icon={<Database size={20} />} title="DuckDB Native / 公開法人データ" status={data?.duckdb_native ? (data.runtime_attached ? "Queria全量を接続中" : (data.duckdb_version || "組み込み済み")) : "初期化中"} ok={!!data?.duckdb_native} description={data?.runtime_attached ? "Queria runtime DB（約582万法人）をDuckDB純正のREAD_ONLY接続で参照中。検索メモリー・リスト・調査メモだけをCompanyMaster側へ保存します。" : "Queria CLIを使わず、組み込みDuckDBがDuckLakeをREAD_ONLYで直接ATTACH。国税庁法人番号＋gBizINFOを法人番号でJOINし、ローカルDuckDBへ高速キャッシュ。"}>
-                <div className="button-row wrap"><button className="primary" onClick={syncDuckDb} disabled={busy === "duckdb"}>{busy === "duckdb" ? <Loader2 className="spin" size={15}/> : <RefreshCw size={15}/>}DuckDB同期</button><button className="ghost" onClick={importCompanies}><Upload size={15}/>DuckDB/Parquet読込</button><button className="ghost" onClick={importTaxonomy}><Upload size={15}/>産業分類</button></div>
+
+              <ConnectionCard icon={<Search size={21} />} title="全文検索索引" status={data?.search_index_available ? "利用可能" : "フォールバック"} ok={Boolean(data?.search_index_available)}>
+                <dl className="metric-list"><div><dt>状態</dt><dd>{data?.search_index_status ?? "未確認"}</dd></div><div><dt>収録行</dt><dd>{data?.search_index_row_count != null ? fmt.format(data.search_index_row_count) : "—"}</dd></div><div><dt>検索経路</dt><dd>{data?.search_index_available ? "SQLite FTS5" : "DuckDB"}</dd></div></dl>
+                <p className="card-note">索引が互換・最新の場合だけ高速検索を使用し、使えない条件は警告付きでDuckDBへ切り替えます。</p>
               </ConnectionCard>
-              <ConnectionCard icon={<CloudSalesforce />} title="Salesforce" status={salesforce?.connected ? "接続済み" : "未接続"} ok={!!salesforce?.connected} description="External Client App + Authorization Code/PKCE。法人番号を外部IDにしてBulk API 2.0でUpsert。">
-                <SalesforceConnect connected={!!salesforce?.connected} onMessage={setMessage} onRefresh={refreshStatus} />
-                {salesforce?.connected && <div className="sf-form sf-mapping">
-                  <input value={sfObjectName} onChange={(e) => setSfObjectName(e.target.value)} placeholder="Object API名: Account" />
-                  <input value={sfExternalId} onChange={(e) => setSfExternalId(e.target.value)} placeholder="外部ID項目: CorporateNumber__c" />
-                  <textarea value={sfMappingText} onChange={(e) => setSfMappingText(e.target.value)} rows={5} aria-label="Salesforce項目マッピング" />
-                  <small>CompanyMaster項目=Salesforce API項目（例: phone=Phone）</small>
-                  {salesforceJob && <div className="sf-job"><span>{salesforceJob.job_id} / {salesforceJob.state}</span><span>処理 {fmt.format(salesforceJob.number_records_processed)}・失敗 {fmt.format(salesforceJob.number_records_failed)}</span><div className="button-row"><button className="ghost tiny" onClick={refreshSalesforceJob}>状態更新</button><button className="ghost tiny" onClick={retrySalesforceFailed} disabled={!!busy || salesforceJob.number_records_failed === 0}>失敗行を再送</button></div></div>}
-                </div>}
+
+              <ConnectionCard icon={<Sparkles size={21} />} title="ChatGPT" status={codex?.authenticated ? "接続済み" : "未接続"} ok={Boolean(codex?.authenticated)}>
+                <p>{codex?.authenticated ? `${codex.email ?? "ChatGPT"} / ${codex.model}` : "文章から検索条件を作り、企業の公開情報を調査するために使用します。"}</p>
+                <div className="card-actions">{codex?.authenticated ? <button className="button quiet" onClick={() => void logoutCodex()} disabled={busy === "codex-logout"}><LogOut size={16} />ログアウト</button> : <button className="button primary" onClick={() => void loginCodex()} disabled={busy === "codex-login"}><LogIn size={16} />ChatGPTでログイン</button>}</div>
+              </ConnectionCard>
+
+              <ConnectionCard icon={<Send size={21} />} title="Salesforce" status={salesforce?.connected ? "接続済み" : "未接続"} ok={Boolean(salesforce?.connected)}>
+                <p>{salesforce?.connected ? `${salesforce.username ?? "ユーザー"} / ${salesforce.instance_url ?? ""}` : "Salesforce CLIで接続すると、選択企業または現在の検索結果を一意なスナップショットとして送信できます。"}</p>
+                {salesforce?.connected && <div className="sf-form"><label>オブジェクト<input value={sfObjectName} onChange={(event) => setSfObjectName(event.target.value)} /></label><label>外部ID<input value={sfExternalId} onChange={(event) => setSfExternalId(event.target.value)} /></label><label>項目マッピング<textarea rows={7} value={sfMappingText} onChange={(event) => setSfMappingText(event.target.value)} /></label><button className="button primary" onClick={() => void sendToSalesforce()} disabled={!result || busy === "salesforce" || (checked.size === 0 && hasUnappliedChanges)} title={checked.size === 0 && hasUnappliedChanges ? "変更した条件を先に検索してください" : undefined}><Send size={16} />{checked.size ? `選択した${checked.size}社` : "現在の検索結果"}を送信</button></div>}
+                {salesforceJob && <div className="job-status"><strong>{salesforceJob.state}</strong><span>{fmt.format(salesforceJob.number_records_processed)}件処理 / {fmt.format(salesforceJob.number_records_failed)}件失敗</span><small>{salesforceJob.job_id}</small></div>}
               </ConnectionCard>
             </div>
-            <div className="local-db"><Database size={16}/><div><strong>ローカルDB</strong><span>{data?.db_path ?? "初期化中"}</span></div></div>
+            {data?.db_path && <div className="path-card"><Database size={17} /><span><strong>現在のデータベース</strong><code>{data.db_path}</code></span></div>}
           </section>
         )}
       </main>
+      {mobileNavOpen && <button className="nav-scrim" aria-label="メニューを閉じる" onClick={() => setMobileNavOpen(false)} />}
     </div>
   );
 }
 
-function ConnectionCard({ icon, title, status, ok, description, children }: { icon: ReactNode; title: string; status: string; ok: boolean; description: string; children: ReactNode }) {
-  return <article className="connection-card"><div className="connection-top"><div className="connection-icon">{icon}</div><span className={ok ? "status ok" : "status"}>{ok && <CheckCircle2 size={13}/>} {status}</span></div><h3>{title}</h3><p>{description}</p><div className="connection-actions">{children}</div></article>;
+function FilterPanel({ plan, setPlan, onApply, busy, onClose }: {
+  plan: SearchPlan;
+  setPlan: React.Dispatch<React.SetStateAction<SearchPlan>>;
+  onApply: (plan: SearchPlan) => void;
+  busy: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <aside className="filter-panel" aria-label="絞り込み条件">
+      <div className="filter-panel-head"><span><Filter size={18} /><strong>絞り込み</strong></span><button className="icon-button" aria-label="絞り込みを閉じる" onClick={onClose}><PanelLeftClose size={18} /></button></div>
+      <div className="filter-scroll">
+        <fieldset>
+          <legend>地域</legend>
+          <label>都道府県
+            <select value="" onChange={(event) => { if (event.target.value) setPlan((current) => ({ ...current, prefectures: Array.from(new Set([...current.prefectures, event.target.value])) })); }}>
+              <option value="">追加する都道府県</option>{prefectures.filter((value) => !plan.prefectures.includes(value)).map((value) => <option value={value} key={value}>{value}</option>)}
+            </select>
+          </label>
+          {plan.prefectures.length > 0 && <div className="mini-chips">{plan.prefectures.map((value) => <button key={value} onClick={() => setPlan((current) => ({ ...current, prefectures: current.prefectures.filter((item) => item !== value) }))}>{value}<X size={13} /></button>)}</div>}
+          <label>市区町村（部分一致）<input value={plan.cities.join("、")} onChange={(event) => setPlan((current) => ({ ...current, cities: splitValues(event.target.value) }))} placeholder="横浜市、千代田区" /></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>業種</legend>
+          <label>JSICコード<input value={plan.industry_codes.join("、")} onChange={(event) => setPlan((current) => ({ ...current, industry_codes: splitValues(event.target.value) }))} placeholder="G、39、3911" /></label>
+          <label>業種キーワード<input value={plan.industry_terms.join("、")} onChange={(event) => setPlan((current) => ({ ...current, industry_terms: splitValues(event.target.value) }))} placeholder="情報サービス、食品製造" /></label>
+          <small className="field-help">大分類・中分類・詳細コードをコード境界で検索します。</small>
+        </fieldset>
+
+        <fieldset>
+          <legend>法人種別</legend>
+          <div className="checkbox-list">{companyKinds.map((kind) => <label key={kind.value}><input type="checkbox" checked={plan.company_kinds.includes(kind.value)} onChange={() => setPlan((current) => ({ ...current, company_kinds: toggle(current.company_kinds, kind.value) }))} />{kind.label}</label>)}</div>
+        </fieldset>
+
+        <fieldset>
+          <legend>規模</legend>
+          <div className="two-fields"><label>従業員 最小<input type="number" min={0} value={plan.min_employees ?? ""} onChange={(event) => setPlan((current) => ({ ...current, min_employees: toOptionalNumber(event.target.value) }))} /></label><label>最大<input type="number" min={0} value={plan.max_employees ?? ""} onChange={(event) => setPlan((current) => ({ ...current, max_employees: toOptionalNumber(event.target.value) }))} /></label></div>
+          <div className="two-fields"><label>資本金 最小<input type="number" min={0} value={plan.min_capital ?? ""} onChange={(event) => setPlan((current) => ({ ...current, min_capital: toOptionalNumber(event.target.value) }))} /></label><label>最大<input type="number" min={0} value={plan.max_capital ?? ""} onChange={(event) => setPlan((current) => ({ ...current, max_capital: toOptionalNumber(event.target.value) }))} /></label></div>
+          <div className="two-fields"><label>設立年 From<input type="number" min={1800} max={2100} value={plan.established_from ?? ""} onChange={(event) => setPlan((current) => ({ ...current, established_from: toOptionalNumber(event.target.value) }))} /></label><label>To<input type="number" min={1800} max={2100} value={plan.established_to ?? ""} onChange={(event) => setPlan((current) => ({ ...current, established_to: toOptionalNumber(event.target.value) }))} /></label></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>公開情報</legend>
+          <label>Webサイト<TriState value={plan.website_required} onChange={(value) => setPlan((current) => ({ ...current, website_required: value }))} /></label>
+          <label>電話番号<TriState value={plan.phone_required} onChange={(value) => setPlan((current) => ({ ...current, phone_required: value }))} /></label>
+        </fieldset>
+
+        <fieldset>
+          <legend>追加キーワード</legend>
+          <label>いずれかを含む<input value={plan.keyword_any.join("、")} onChange={(event) => setPlan((current) => ({ ...current, keyword_any: splitValues(event.target.value) }))} placeholder="SaaS、クラウド" /></label>
+          <label>すべてを含む<input value={plan.keyword_all.join("、")} onChange={(event) => setPlan((current) => ({ ...current, keyword_all: splitValues(event.target.value) }))} placeholder="自社開発、法人向け" /></label>
+          <label>全件操作の上限<input type="number" min={1} max={MAX_RESULTS} value={plan.limit} onChange={(event) => setPlan((current) => ({ ...current, limit: Math.max(1, Math.min(MAX_RESULTS, Number(event.target.value) || 1)) }))} /></label>
+        </fieldset>
+      </div>
+      <div className="filter-panel-actions"><button className="button quiet" onClick={() => setPlan(emptyPlan())}>クリア</button><button className="button primary" disabled={busy} onClick={() => onApply(plan)}>{busy ? <Loader2 className="spin" size={16} /> : <Search size={16} />}この条件で検索</button></div>
+    </aside>
+  );
 }
 
-function CloudSalesforce() {
-  return <span style={{ fontWeight: 800, fontSize: 13 }}>SF</span>;
+function TriState({ value, onChange }: { value?: boolean | null; onChange: (value: boolean | null) => void }) {
+  return <select value={value == null ? "any" : value ? "yes" : "no"} onChange={(event) => onChange(event.target.value === "any" ? null : event.target.value === "yes")}><option value="any">指定なし</option><option value="yes">あり</option><option value="no">なし</option></select>;
 }
 
-function SalesforceConnect({ connected, onMessage, onRefresh }: { connected: boolean; onMessage: (s: string) => void; onRefresh: () => Promise<void> }) {
-  const [loginUrl, setLoginUrl] = useState("https://login.salesforce.com");
-  const [clientId, setClientId] = useState("");
-  const [busy, setBusy] = useState(false);
-  if (connected) return <span className="muted">接続情報はWindows資格情報ストアに保存されます。</span>;
-  return <div className="sf-form"><input value={loginUrl} onChange={(e) => setLoginUrl(e.target.value)} placeholder="Salesforce Login URL"/><input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="External Client App Client ID"/><button className="primary" disabled={!clientId || busy} onClick={async () => {setBusy(true); try { const {auth_url}=await api.salesforceLogin(loginUrl, clientId); await openUrl(auth_url); onMessage("Salesforceの認証をブラウザで完了してください。"); setTimeout(() => void onRefresh(), 3500); } catch(e){ onMessage(String(e)); } finally {setBusy(false);} }}>{busy ? <Loader2 className="spin" size={15}/> : <LogIn size={15}/>}接続</button></div>;
+function SortableHeader({ label, field, plan, onSort }: { label: string; field: SortField; plan: SearchPlan; onSort: (field: SortField) => Promise<void> }) {
+  const active = plan.sort_by === field;
+  const ariaSort = active ? (plan.sort_direction === "desc" ? "descending" : "ascending") : "none";
+  return <th aria-sort={ariaSort}><button className="sort-button" onClick={() => void onSort(field)}>{label}<span aria-hidden="true">{active ? plan.sort_direction === "desc" ? "↓" : "↑" : "↕"}</span></button></th>;
+}
+
+function DetailPanel({ company, busy, engine, onClose, onOpenUrl, onResearch, onCollectPhone }: {
+  company: Company | null;
+  busy: string | null;
+  engine?: string;
+  onClose: () => void;
+  onOpenUrl: (url?: string | null) => Promise<void>;
+  onResearch: () => Promise<void>;
+  onCollectPhone: () => Promise<void>;
+}) {
+  if (!company) return <aside className="detail-panel empty-detail"><Building2 size={27} /><strong>企業を選択</strong><span>行を選ぶと、出典を含む詳細をここで確認できます。</span></aside>;
+  return (
+    <aside className="detail-panel" aria-label={`${company.name}の詳細`}>
+      <div className="detail-head"><div><small>法人番号 {company.corporate_number || "未確認"}</small><h2>{company.name}</h2></div><button className="icon-button" aria-label="詳細を閉じる" onClick={onClose}><X size={18} /></button></div>
+      <div className="source-line"><span className="source-badge"><Database size={13} />企業マスター</span>{engine && <span className="source-badge muted">{engine}</span>}</div>
+      <dl className="detail-list">
+        <div><dt>FUMA ID</dt><dd>{company.fuma_id || "—"}</dd></div>
+        <div><dt>データ区分</dt><dd>{company.source_kind || "—"}</dd></div>
+        <div><dt>法人種別</dt><dd>{formatKind(company.kind)}</dd></div>
+        <div><dt>所在地</dt><dd>{[company.prefecture, company.city, company.address].filter(Boolean).join(" ") || "—"}</dd></div>
+        <div><dt>業種</dt><dd>{company.industry_name || company.inferred_industry_name || "—"}{company.industry_code && <small>{company.industry_code}</small>}</dd></div>
+        <div><dt>業種階層</dt><dd>{[company.industry_middle_name, company.industry_small_name, company.industry_detail_name].filter(Boolean).join(" / ") || "—"}</dd></div>
+        <div><dt>従業員</dt><dd>{company.employees == null ? "—" : `${fmt.format(company.employees)}名`}</dd></div>
+        <div><dt>資本金</dt><dd>{compactNumber(company.capital)}</dd></div>
+        <div><dt>設立年</dt><dd>{company.established_year ?? "—"}</dd></div>
+        <div><dt>代表者</dt><dd>{company.representative || "—"}</dd></div>
+        <div><dt>電話</dt><dd>{company.phone || "—"}{company.phone_type && <small>{company.phone_type}</small>}</dd></div>
+        <div><dt>電話出典</dt><dd>{company.phone_source_url ? <button className="inline-link" onClick={() => void onOpenUrl(company.phone_source_url)}>{company.phone_source_url}<ExternalLink size={14} /></button> : "—"}</dd></div>
+        <div><dt>Web</dt><dd>{company.website ? <button className="inline-link" onClick={() => void onOpenUrl(company.website)}>{company.website}<ExternalLink size={14} /></button> : "—"}</dd></div>
+      </dl>
+      {company.business_summary && <div className="business-summary"><strong>事業概要</strong><p>{company.business_summary}</p></div>}
+      <div className="detail-actions"><button className="button primary" onClick={() => void onResearch()} disabled={busy === "research"}><FileSearch size={16} />この企業を調査</button><button className="button quiet" onClick={() => void onCollectPhone()} disabled={!company.website || busy === "phone"}>{busy === "phone" ? <Loader2 className="spin" size={16} /> : <Phone size={16} />}公式サイトから電話確認</button></div>
+      {company.source_updated_at && <small className="updated-at">データ更新: {company.source_updated_at}</small>}
+    </aside>
+  );
+}
+
+function LoadingRows() {
+  return <>{Array.from({ length: 7 }, (_, index) => <tr className="skeleton-row" key={index}><td colSpan={7}><span /></td></tr>)}</>;
+}
+
+function EmptyState({ icon, title, text }: { icon: React.ReactNode; title: string; text: string }) {
+  return <div className="empty-state">{icon}<strong>{title}</strong><span>{text}</span></div>;
+}
+
+function PageHeading({ eyebrow, title, description }: { eyebrow: string; title: string; description: string }) {
+  return <div className="page-heading"><span>{eyebrow}</span><h1>{title}</h1><p>{description}</p></div>;
+}
+
+function ConnectionCard({ icon, title, status, ok, children }: { icon: React.ReactNode; title: string; status: string; ok: boolean; children: React.ReactNode }) {
+  return <article className="connection-card"><div className="connection-card-head"><span className="connection-icon">{icon}</span><span className={`status-badge ${ok ? "ok" : ""}`}>{ok && <CheckCircle2 size={14} />}{status}</span></div><h2>{title}</h2>{children}</article>;
 }
 
 export default App;

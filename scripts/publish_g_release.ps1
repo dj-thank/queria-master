@@ -2,6 +2,8 @@ param(
   [string]$Version = "0.10.0",
   [string]$Repository = "dj-thank/queria-master",
   [string]$ReleaseDirectory = "releases/CompanyMaster-G37-41",
+  [Parameter(Mandatory = $true)]
+  [string]$InstallerDirectory,
   [string]$Target = "main"
 )
 
@@ -36,6 +38,14 @@ foreach ($path in $required) {
   }
 }
 
+$installerRoot = (Resolve-Path (Join-Path $root $InstallerDirectory)).Path
+$installers = @(Get-ChildItem -LiteralPath $installerRoot -Recurse -File | Where-Object {
+  $_.Extension -in @(".exe", ".msi") -and $_.Name -ne "CompanyMaster-G37-41.exe"
+} | Select-Object -ExpandProperty FullName)
+if ($installers.Count -eq 0) {
+  throw "No Windows installer (.exe or .msi) found in $installerRoot"
+}
+
 foreach ($property in $audit.artifacts.PSObject.Properties) {
   $name = $property.Name
   $candidate = if ($name -eq "CompanyMaster-G37-41.exe") {
@@ -63,5 +73,6 @@ $existing = gh release view $tag --repo $Repository --json tagName 2>$null
 if (-not $existing) {
   gh release create $tag --repo $Repository --target $Target --title "CompanyMaster 大分類G $tag" --notes-file (Join-Path $root "docs\RELEASE_G_V0100_JA.md")
 }
-gh release upload $tag --repo $Repository --clobber @required
+$assets = @($required) + @($installers)
+gh release upload $tag --repo $Repository --clobber @assets
 gh release view $tag --repo $Repository --json url,tagName,assets

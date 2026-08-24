@@ -41,6 +41,7 @@ GitHub Release assetは1ファイル2GiB未満に保ち、Gitリポジトリ本�
 - `search_g_fuma.sqlite`: 高速検索索引
 - `phone_targets_g37_41.csv`: 未取得連絡先の再開用状態
 - `source_metadata.json`, `audit.json`, `README_PORTABLE_JA.md`: 出典・完全性・操作説明
-- `CompanyMaster-G37-41.exe`: Windowsアプリ
+- `CompanyMaster-G37-41.exe`: DBと同じフォルダで使うポータブルWindowsアプリ
+- `CompanyMaster-G37-41_*_setup.exe`, `CompanyMaster-G37-41_*.msi`: Windowsインストーラー
 
-リポジトリ本体にはバイナリDBをコミットしません。`scripts/publish_g_release.ps1`は監査JSONとのSHA-256一致、WAL不在、個人ローカルパス不在を確認してからReleaseへアップロードします。
+リポジトリ本体にはバイナリDBをコミットしません。GitHub Actionsの`CompanyMaster-Windows` artifactから同じcommitのポータブルEXEとインストーラーを取得します。`scripts/publish_g_release.ps1 -InstallerDirectory <artifact展開先>`は監査JSONとのSHA-256一致、WAL不在、個人ローカルパス不在を確認してからReleaseへアップロードします。

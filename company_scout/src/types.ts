@@ -12,8 +12,11 @@ export type SearchPlan = {
   established_from?: number | null;
   established_to?: number | null;
   website_required?: boolean | null;
+  phone_required?: boolean | null;
   keyword_any: string[];
   keyword_all: string[];
+  sort_by?: "relevance" | "name" | "employees" | "capital" | null;
+  sort_direction?: "asc" | "desc" | null;
   limit: number;
 };
 
@@ -69,6 +72,8 @@ export type SearchResult = {
   page: number;
   page_size: number;
   elapsed_ms: number;
+  engine: string;
+  warnings: string[];
 };
 
 export type CodexStatus = {
@@ -112,6 +117,10 @@ export type DataStatus = {
   duckdb_native: boolean;
   runtime_attached: boolean;
   duckdb_version?: string | null;
+  search_index_available: boolean;
+  search_index_path?: string | null;
+  search_index_status?: string | null;
+  search_index_row_count?: number | null;
 };
 
 export type SalesforceStatus = {

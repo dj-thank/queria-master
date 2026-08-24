@@ -416,7 +416,11 @@ G / G37 / G38 / G39 / G40 / G41
 
 ### Windows EXE
 
+新しいデスクトップUIの正本は `company_scout/` のReact + Tauri/Rust版です。`queria_master/desktop_app.py` からビルドするTkinter版は既存配布向けのレガシー・メンテナンスUIとして残し、新しい操作設計と機能追加はTauri版を優先します。UIと検索の契約は [`docs/UI_SEARCH_WORKBENCH_2026-08-21.md`](docs/UI_SEARCH_WORKBENCH_2026-08-21.md) を参照してください。
+
 外部DBをEXEへ埋め込まず、実行ファイルは軽量な処理本体、DB・検索索引は同じフォルダの `data` に置く構成です。これにより5.8百万法人の再配布時にEXEを作り直す必要がありません。
+
+レガシーDesktop版:
 
 ```powershell
 .\scripts\build_exe.ps1
@@ -444,6 +448,31 @@ EXEの再ビルド後は `dist\queria-master.exe.json` にサイズ、SHA-256、
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 .\.venv\Scripts\python.exe scripts\verify_package.py
 ```
+
+Public Company Enrichment:
+
+```bash
+cd company_scout/public_enrichment
+python -m unittest discover -s tests -v
+```
+
+Public Company EnrichmentはGitHub Actionsで Python 3.11 / 3.12 / 3.13 の構文チェックとオフラインテストを実行します。
+
+## ドキュメント
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 全体設計
+- [`docs/V090_OPERATIONAL_ARCHITECTURE_JA.md`](docs/V090_OPERATIONAL_ARCHITECTURE_JA.md) — canonical / runtime / index運用
+- [`docs/COMPANYMASTER_INTEGRATION_JA.md`](docs/COMPANYMASTER_INTEGRATION_JA.md) — Windowsアプリ統合
+- [`docs/UI_SEARCH_WORKBENCH_2026-08-21.md`](docs/UI_SEARCH_WORKBENCH_2026-08-21.md) — React/Tauri検索UIと索引フォールバックの契約
+- [`docs/OUTBOUND_ENRICHMENT_RUNBOOK_JA.md`](docs/OUTBOUND_ENRICHMENT_RUNBOOK_JA.md) — 証拠付きenrichment運用
+- [`docs/SEARCH_PERFORMANCE.md`](docs/SEARCH_PERFORMANCE.md) — 検索性能の測定
+- [`docs/GITHUB_DISTRIBUTION_JA.md`](docs/GITHUB_DISTRIBUTION_JA.md) — 大容量配布
+- [`docs/ADR_G_INFORMATION_DATABASE_JA.md`](docs/ADR_G_INFORMATION_DATABASE_JA.md) — 情報通信業版DBの設計判断
+- [`docs/GITHUB_BRANCH_AUDIT_20260824.md`](docs/GITHUB_BRANCH_AUDIT_20260824.md) — GitHubブランチ全量監査
+- [`docs/RELEASE_G_V0100_JA.md`](docs/RELEASE_G_V0100_JA.md) — 情報通信業版 v0.10.0 リリースノート
+- [`company_scout/public_enrichment/README.md`](company_scout/public_enrichment/README.md) — 公開企業情報補完
+- [`company_scout/public_enrichment/SECURITY.md`](company_scout/public_enrichment/SECURITY.md) — 補完処理のセキュリティ境界
+- [`company_scout/public_enrichment/reference/README.md`](company_scout/public_enrichment/reference/README.md) — 検証済み公式連絡先
 
 ## 出典
 
