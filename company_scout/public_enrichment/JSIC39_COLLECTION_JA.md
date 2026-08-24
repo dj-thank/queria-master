@@ -80,6 +80,7 @@ python corporate_index_matcher.py `
 | 状態 | 意味 |
 | --- | --- |
 | `phone_candidate_found` | 公式サイト内で1件以上の電話番号候補と根拠を取得 |
+| `fax_only` | FAX候補だけを取得。通話可能な電話番号の成功件数には含めない |
 | `processed_no_phone` | 規定ページを確認したが電話番号候補なし |
 | `website_pending` | 公式URLあり、まだ今回のバッチでは未処理 |
 | `website_missing` | 公開法人データ上で公式URLを確認できない |

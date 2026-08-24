@@ -225,6 +225,42 @@ class Jsic39CollectionTest(unittest.TestCase):
         self.assertEqual(rows["1000000000001"]["収集状態"], "phone_candidate_found")
         self.assertEqual(rows["1000000000002"]["収集状態"], "website_pending")
 
+    def test_merge_reports_fax_only_separately_from_voice_candidates(self) -> None:
+        manifest = self.root / "manifest.csv"
+        module.write_csv(manifest, ["法人番号"], [{"法人番号": "1000000000001"}])
+        progress = self.root / "progress.jsonl"
+        progress.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "corporate_number": "1000000000001",
+                "state": "fax_only",
+                "candidates": [{
+                    "phone": "0312345678",
+                    "candidate_type": "FAX",
+                    "url": "https://alpha.example/company",
+                    "context": "FAX 03-1234-5678",
+                    "source": "text",
+                    "score": 0.0,
+                }],
+                "completed_at": "2026-08-24T00:00:00Z",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        output = self.root / "output.csv"
+        result = module.merge_batches(
+            all_companies_csv=self.companies,
+            manifests=[str(manifest)],
+            phone_files=[],
+            progress_files=[str(progress)],
+            output=output,
+            summary=self.root / "summary.json",
+        )
+
+        rows = {row["法人番号"]: row for row in module.read_csv(output)}
+        self.assertEqual(rows["1000000000001"]["収集状態"], "fax_only")
+        self.assertEqual(result["fax_only_companies"], 1)
+        self.assertEqual(result["companies_with_voice_candidates"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

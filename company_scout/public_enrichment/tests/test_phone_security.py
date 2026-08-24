@@ -110,6 +110,22 @@ class PhoneSecurityTests(unittest.TestCase):
         self.assertIsNone(result["reason"])
         self.assertEqual(result["pages_fetched"], 1)
 
+    def test_fax_only_page_is_not_counted_as_voice_phone_success(self) -> None:
+        def fake_get(_session, url: str, **_kwargs):
+            if url.endswith("/robots.txt"):
+                return url, 404, {"Content-Type": "text/plain"}, ""
+            return url, 200, {"Content-Type": "text/html; charset=utf-8"}, "<html><body>FAX 03-1234-5678</body></html>"
+
+        with patch.object(phone, "is_public_http_url", return_value=True), patch.object(
+            phone, "safe_get_text", side_effect=fake_get
+        ):
+            result = phone.discover_site_result(object(), "https://example.com/", 4, 20, 0)
+
+        self.assertEqual(result["state"], "fax_only")
+        self.assertEqual(result["reason"], "fax_only")
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["candidate_type"], "FAX")
+
 
 if __name__ == "__main__":
     unittest.main()

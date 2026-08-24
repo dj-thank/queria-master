@@ -303,6 +303,7 @@ def merge_batches(
 
     output_rows: list[dict[str, Any]] = []
     website_count = processed_count = companies_with_phone = candidate_total = 0
+    companies_with_voice = fax_only_companies = voice_candidate_total = 0
     for row in all_rows:
         corporate_number = clean(row.get("corporate_number"))
         website = normalize_url(row.get("company_url"))
@@ -312,6 +313,7 @@ def merge_batches(
             reverse=True,
         )
         best = candidates[0] if candidates else {}
+        voice_candidates = [candidate for candidate in candidates if clean(candidate.get("電話種別候補")) != "FAX"]
         if website:
             website_count += 1
         if corporate_number in processed:
@@ -319,8 +321,15 @@ def merge_batches(
         if candidates:
             companies_with_phone += 1
             candidate_total += len(candidates)
-        if candidates:
+        if voice_candidates:
+            companies_with_voice += 1
+            voice_candidate_total += len(voice_candidates)
+        elif candidates:
+            fax_only_companies += 1
+        if voice_candidates:
             status = "phone_candidate_found"
+        elif candidates:
+            status = "fax_only"
         elif corporate_number in processed:
             progress_state = clean(progress_by_company.get(corporate_number, {}).get("state"))
             status = progress_state if progress_state and progress_state != "phone_candidate_found" else "processed_no_phone"
@@ -400,6 +409,9 @@ def merge_batches(
         "processed_for_phone": processed_count,
         "companies_with_phone_candidates": companies_with_phone,
         "phone_candidates_total": candidate_total,
+        "companies_with_voice_candidates": companies_with_voice,
+        "voice_phone_candidates_total": voice_candidate_total,
+        "fax_only_companies": fax_only_companies,
         "manifest_files": [str(path) for path in manifest_paths],
         "phone_files": [str(path) for path in phone_paths],
         "progress_files": [str(path) for path in progress_paths],

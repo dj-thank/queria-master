@@ -444,6 +444,7 @@ OUTPUT_FIELDS = [
 ]
 TERMINAL_STATES = {
     "phone_candidate_found",
+    "fax_only",
     "processed_no_phone",
     "blocked_by_policy",
     "needs_review",
@@ -567,10 +568,14 @@ def discover_site_result(
         robot=robot,
     )
     candidates = list(crawl["candidates"])
+    voice_candidates = [candidate for candidate in candidates if candidate.get("candidate_type") != "FAX"]
     pages_fetched = int(crawl["pages_fetched"])
-    if candidates:
+    if voice_candidates:
         state = "phone_candidate_found"
         reason = None
+    elif candidates:
+        state = "fax_only"
+        reason = "fax_only"
     elif pages_fetched:
         state = "processed_no_phone"
         reason = None
