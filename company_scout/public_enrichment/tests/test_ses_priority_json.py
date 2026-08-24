@@ -18,6 +18,12 @@ import ses_priority_json as priority
 SCHEMA = ROOT / "schemas" / "it-subsidiary-ses-priority-v1.schema.json"
 
 
+def test_normalize_url_percent_encodes_unicode_path_for_json_schema_uri() -> None:
+    normalized = priority.normalize_url("https://example.jp/施設紹介/会社概要?q=日本語")
+    assert normalized.startswith("https://example.jp/%E6%96%BD%E8%A8%AD")
+    assert "日本語" not in normalized
+
+
 def write_targets(path: Path) -> None:
     fields = [
         "entity_key", "corporate_number", "website", "state", "company_name",

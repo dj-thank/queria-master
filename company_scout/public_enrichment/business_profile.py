@@ -273,9 +273,13 @@ def validate_profile_evidence_host(profile: dict[str, Any], official_site_url: s
         ).lower().removeprefix("www.")
         if evidence_host != official_host:
             return False
-        if not re.fullmatch(r"[a-f0-9]{64}", str(fact.get("excerpt_sha256") or "")):
+        excerpt = str(fact.get("excerpt") or "")
+        excerpt_sha256 = str(fact.get("excerpt_sha256") or "")
+        if not re.fullmatch(r"[a-f0-9]{64}", excerpt_sha256):
             return False
-        if len(str(fact.get("excerpt") or "")) > MAX_EXCERPT_CHARS:
+        if hashlib.sha256(excerpt.encode("utf-8")).hexdigest() != excerpt_sha256:
+            return False
+        if len(excerpt) > MAX_EXCERPT_CHARS:
             return False
     for candidate in profile.get("parent_company_candidates") or []:
         evidence_host = (
@@ -283,7 +287,11 @@ def validate_profile_evidence_host(profile: dict[str, Any], official_site_url: s
         ).lower().removeprefix("www.")
         if evidence_host != official_host:
             return False
-        if not re.fullmatch(r"[a-f0-9]{64}", str(candidate.get("excerpt_sha256") or "")):
+        excerpt = str(candidate.get("excerpt") or "")
+        excerpt_sha256 = str(candidate.get("excerpt_sha256") or "")
+        if not re.fullmatch(r"[a-f0-9]{64}", excerpt_sha256):
+            return False
+        if hashlib.sha256(excerpt.encode("utf-8")).hexdigest() != excerpt_sha256:
             return False
         if not clean_text(candidate.get("name")):
             return False

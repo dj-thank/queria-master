@@ -12,7 +12,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import urlparse
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from business_profile import (
     SCORE_FORMULA_VERSION,
@@ -77,10 +77,20 @@ def normalize_url(value: Any) -> str:
         return ""
     if "://" not in url:
         url = "https://" + url.lstrip("/")
-    parsed = urlparse(url)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         return ""
-    return url
+    try:
+        host = parsed.hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        return ""
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
+    path = quote(parsed.path or "/", safe="/%:@-._~!$&'()*+,;=")
+    query = quote(parsed.query, safe="=&?/%:+,;@-._~!$'()*")
+    fragment = quote(parsed.fragment, safe="-._~!$&'()*+,;=:@/?")
+    return urlunsplit((parsed.scheme.lower(), netloc, path, query, fragment))
 
 
 def normalize_phone(value: Any) -> str:

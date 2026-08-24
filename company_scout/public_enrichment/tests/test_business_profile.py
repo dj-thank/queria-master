@@ -135,6 +135,15 @@ def test_profile_host_validation_rejects_cross_host_and_oversized_excerpt() -> N
     assert not profile.validate_profile_evidence_host(result, "https://alpha.example/")
 
 
+def test_profile_host_validation_recomputes_excerpt_hash() -> None:
+    result = profile.extract_business_profile_evidence(
+        "https://alpha.example/about",
+        "受託開発",
+    )
+    result["facts"][0]["excerpt_sha256"] = "a" * 64
+    assert not profile.validate_profile_evidence_host(result, "https://alpha.example/")
+
+
 def test_progress_binding_rejects_cross_host_profile_evidence() -> None:
     targets = [{
         "corporate_number": "1000000000001",
