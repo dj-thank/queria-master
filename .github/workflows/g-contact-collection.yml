@@ -12,7 +12,7 @@ on:
         required: false
         default: "0"
       batch_size:
-        description: Companies per shard (8 shards; default total 1,000)
+        description: Companies per shard (8 shards; 1-550, default total 1,000)
         required: false
         default: "125"
       max_pages:
@@ -153,7 +153,7 @@ jobs:
           [[ "$START_OFFSET" =~ ^[0-9]+$ ]]
           [[ "$BATCH_SIZE" =~ ^[0-9]+$ ]]
           [[ "$MAX_PAGES" =~ ^[0-9]+$ ]]
-          (( BATCH_SIZE >= 1 && BATCH_SIZE <= 500 ))
+          (( BATCH_SIZE >= 1 && BATCH_SIZE <= 550 ))
           (( MAX_PAGES >= 1 && MAX_PAGES <= 10 ))
           if [[ -n "$PRIOR_RUN_ID" ]]; then
             [[ "$PRIOR_RUN_ID" =~ ^[0-9]+$ ]] || {

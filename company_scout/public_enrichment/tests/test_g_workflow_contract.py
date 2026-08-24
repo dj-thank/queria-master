@@ -51,6 +51,7 @@ class GContactWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("path: company_scout/public_enrichment/output/g_ses_priority_profiles", text)
         self.assertIn('[[ "$START_OFFSET" =~ ^[0-9]+$ ]]', text)
         self.assertIn('[[ "$PRIOR_RUN_ID" =~ ^[0-9]+$ ]]', text)
+        self.assertIn("BATCH_SIZE <= 550", text)
         self.assertIn('test -e "$WORK/progress.jsonl"', text)
         self.assertNotIn('test -s "$WORK/progress.jsonl"', text)
 
