@@ -6,6 +6,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +55,25 @@ class PublicDataEnricherTests(unittest.TestCase):
         headers = json.loads(pe.get_meta(self.con, "source_headers_json"))
         original = json.loads(row["source_row_json"])
         self.assertEqual(dict(zip(headers, original))["任意列"], "保持値")
+
+    def test_xlsx_uses_first_sheet_when_name_is_omitted(self) -> None:
+        path = self.root / "companies.xlsx"
+        workbook = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="{pe.XLS_NS}" xmlns:r="{pe.REL_NS}"><sheets><sheet name="Companies" sheetId="1" r:id="rId1"/></sheets></workbook>'''
+        relationships = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="{pe.PKG_REL_NS}"><Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/></Relationships>'''
+        sheet = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="{pe.XLS_NS}"><sheetData>
+<row r="1"><c r="A1" t="inlineStr"><is><t>企業名</t></is></c><c r="B1" t="inlineStr"><is><t>所在地</t></is></c></row>
+<row r="2"><c r="A2" t="inlineStr"><is><t>例示株式会社</t></is></c><c r="B2" t="inlineStr"><is><t>東京都千代田区1-1-1</t></is></c></row>
+</sheetData></worksheet>'''
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("xl/workbook.xml", workbook)
+            archive.writestr("xl/_rels/workbook.xml.rels", relationships)
+            archive.writestr("xl/worksheets/sheet1.xml", sheet)
+        result = pe.prepare_from_xlsx(self.con, path, sheet_name="")
+        self.assertEqual(result["inserted"], 1)
+        self.assertEqual(self.con.execute("SELECT company_name FROM companies").fetchone()[0], "例示株式会社")
 
     def test_basic_import_refuses_unscoped_dump(self) -> None:
         self.prepare()

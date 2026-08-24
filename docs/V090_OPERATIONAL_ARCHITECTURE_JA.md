@@ -10,9 +10,12 @@
 |---|---|---|
 | `queria_master.duckdb` | 公開ソースから再構築するcanonical DB | `refresh` |
 | `queria_enrichment.duckdb` | 証拠、拡張値、調査状態、抑止 | 単一writer |
-| `queria_runtime.duckdb` | canonicalとenrichmentを統合した検索用snapshot | `build-runtime` |
-| `search.sqlite` | runtime DB専用のFTS・カテゴリ索引 | `build-search-index` |
+| `queria_runtime.duckdb` | canonicalとenrichmentを統合した検索用snapshot | `publish-runtime` |
+| `search.sqlite` | runtime DB専用のFTS・カテゴリ索引 | `publish-runtime` |
 | `config/queria-settings.json` | portableな保存設定 | GUI / `configure` |
+| caller-named `*.duckdb` / `*.ddb` | 履歴Hojinjoho ZIPの非正本staging | `import-gbiz-archive` |
+
+履歴Hojinjoho ZIPはこの正本系列へ直接入りません。`import-gbiz-archive` は一意なhidden building DBのtransactionへ書き込み、対象JSON memberの検証とcommitが完了した場合だけ、未存在の新規staging名へno-clobber公開します。canonicalへの昇格は自動実行しません。合成ZIPの自動テストは通過しています。別途復元できた companion 監査記録には379,025,154 bytesなどの値がありますが、元ZIP本体は取得できず、現 importer の完走検証は未実施です。詳細は [`GBIZ_ARCHIVE_IMPORT_JA.md`](GBIZ_ARCHIVE_IMPORT_JA.md) を参照してください。
 
 `runtime` と `search.sqlite` は同じ生成世代でなければ使用しません。0.9ではruntime manifestとSQLite metadataへ同じ`generation_id`を記録し、サイズだけでなく世代IDを照合します。
 
@@ -86,13 +89,14 @@ queria-master sync-embedded-public
 
 途中生成物は`.building`または`.part`へ書き、検査後にのみ正式名へ切り替えます。
 
-## データ拡張の次段階
+## データ拡張パイプライン
 
 1. 既存の構造化公開データを法人番号で追加統合
-2. 既知の公式URL 44,433法人を限定crawlし、1回の取得から電話・フォーム・事業内容を抽出
-3. 公式サイト候補発見を独立adapterとして追加
-4. workerはDuckDBへ直接書かず、JSONL/Parquet spoolへ出力
-5. 単一ingestion writerが検証・重複排除・証拠付与して反映
+2. Web検索adapterは公式サイト候補metadataだけを `official_candidate / needs_review` として出力
+3. 独立した同一性・公式性の検証でだけ `official_homepage / verified` へ昇格
+4. 検証済み公式URLを1回取得し、電話・メール・フォームを同じ証拠から抽出
+5. 単一ingestion writerが検証・重複排除・証拠付与してenrichmentへ反映
+6. `publish-runtime` がruntime/indexを同一generationとして検証・公開
 
 全法人に値が存在すると仮定しません。KPIは`eligible`、`processed`、`found`、`verified`、`blocked_by_policy`、鮮度を分けます。推定メール、SMTP probing、個人アドレス生成は行いません。
 
@@ -107,4 +111,4 @@ ChatGPT Proレビューは設計提案として使用し、次を採用しまし
 - auditとbundleのstrict gate
 - 公開データ優先、host-aware crawl、単一writer
 
-active generation切替、append-only observations、差分索引更新は後続段階です。ローカル実装・テスト・実データ検証が未完了の提案は完成機能として扱いません。
+世代別ディレクトリをmanifest 1個で切り替える完全なpair atomicity、append-only observations、差分索引更新は後続段階です。現在は2ファイルの置換途中に世代不一致を必ず検出してDuckDBへフォールバックします。ローカル実装・テスト・実データ検証が未完了の提案は完成機能として扱いません。

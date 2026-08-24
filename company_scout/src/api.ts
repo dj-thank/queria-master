@@ -8,6 +8,8 @@ import type {
   SalesforceFieldMapping,
   SalesforceJobStatus,
   PhoneCollectionResult,
+  PublicEnrichmentOperation,
+  PublicEnrichmentStatus,
   SavedSearch,
   SearchPlan,
   SearchResult,
@@ -43,6 +45,14 @@ export const api = {
   syncDuckDb: () => invoke<{ imported: number; source: string; duckdb_version: string }>("sync_duckdb_company_master"),
   importFile: (path: string) => invoke<number>("import_company_file", { path }),
   importTaxonomy: (path: string) => invoke<number>("import_industry_taxonomy", { path }),
+
+  publicEnrichmentStatus: () => invoke<PublicEnrichmentStatus>("public_enrichment_status"),
+  publicEnrichmentPrepare: (sourcePath: string, sheetName: string | null, replace: boolean) =>
+    invoke<PublicEnrichmentOperation>("public_enrichment_prepare", { sourcePath, sheetName, replace }),
+  publicEnrichmentMakeAssignment: (outputPath: string, chunkSize = 10000) =>
+    invoke<PublicEnrichmentOperation>("public_enrichment_make_assignment", { outputPath, chunkSize }),
+  publicEnrichmentRunAll: (inputDir: string) =>
+    invoke<PublicEnrichmentOperation>("public_enrichment_run_all", { inputDir }),
 
   salesforceStatus: () => invoke<SalesforceStatus>("salesforce_status"),
   salesforceLogin: (loginUrl: string, clientId: string) =>

@@ -19,12 +19,16 @@ from .enrichment import (
     export_sales_ready_accounts,
     import_enrichment_jsonl,
     initialize_database as initialize_enrichment_database,
+    review_contact,
     seed_enrichment,
     sync_embedded_public_enrichment,
 )
 from .enrichment_worker import run_enrichment_worker
+from .gbiz_archive import GBizArchiveError, import_archive_to_staging
 from .health import inspect_application
 from .pipeline import PipelineError, online_probe, refresh, version_report
+from .public_enrichment_bridge import integrate_public_enrichment
+from .publish import PublishError, publish_runtime_bundle
 from .query import run_local_sql, search_companies, semantic_search_companies, show_summary
 from .resident import run_jsonl_protocol
 from .resources import ALL_PUBLIC_SCOPE, DEFAULT_CACHE, DEFAULT_DB, PROJECT_ROOT, public_scope_choices
@@ -34,8 +38,9 @@ from .runtime import (
     build_runtime_database,
     runtime_summary,
 )
-from .search_index import DEFAULT_SEARCH_INDEX, build_search_index
+from .search_index import DEFAULT_SEARCH_INDEX, SearchIndexError, build_search_index
 from .semantic_index import DEFAULT_SEMANTIC_INDEX, SemanticIndexError, build_semantic_index
+from .website_discovery import VERIFICATION_METHODS, import_discovery_jsonl, verify_website_candidate
 
 
 def _path(value: str) -> Path:
@@ -65,6 +70,39 @@ def _parser() -> argparse.ArgumentParser:
     )
     refresh_parser.add_argument("--cache-dir", type=_path, default=DEFAULT_CACHE)
     refresh_parser.add_argument("--no-cache", action="store_true", help="抽出 Parquet を保持しない")
+
+    archive_parser = sub.add_parser(
+        "import-gbiz-archive",
+        help="履歴Hojinjoho ZIPを新規の監査用staging DuckDBへ安全に展開",
+        description=(
+            "履歴gBizINFO Hojinjoho ZIPを検証し、新規の監査用staging DuckDBを作成します。"
+            "canonical DB、runtime、検索索引は参照も変更もしません。"
+        ),
+    )
+    archive_parser.add_argument(
+        "--archive",
+        type=_path,
+        required=True,
+        help="top-level JSON arrayを含むHojinjoho ZIP",
+    )
+    archive_parser.add_argument(
+        "--staging-db",
+        type=_path,
+        required=True,
+        help="新規作成する未存在の.duckdb/.ddb（既存ファイルは拒否）",
+    )
+    archive_parser.add_argument(
+        "--target-industry",
+        choices=("ALL", *tuple("ABCDEFGHIJKLMNOPQRST")),
+        default="G",
+        help="JSIC大分類A〜T（既定G、ZIP内全件はALL。中分類37〜41は指定不可）",
+    )
+    archive_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1000,
+        help="DuckDBへ書き込む法人batch件数（1〜100000、既定1000）",
+    )
 
     doctor_parser = sub.add_parser("doctor", help="ローカル環境と DB を検証")
     doctor_parser.add_argument("--online", action="store_true", help="Queria への接続も確認")
@@ -113,6 +151,17 @@ def _parser() -> argparse.ArgumentParser:
 
     runtime_summary_parser = sub.add_parser("runtime-summary", help="統合ランタイムDBの件数と収録状態を表示")
     runtime_summary_parser.add_argument("--runtime-db", type=_path)
+
+    publish_parser = sub.add_parser(
+        "publish-runtime",
+        help="runtime DBと検索索引を検証済みの同一generationとして公開",
+    )
+    publish_parser.add_argument("--enrichment-db", type=_path)
+    publish_parser.add_argument("--runtime-db", type=_path)
+    publish_parser.add_argument("--search-index", type=_path)
+    publish_parser.add_argument("--threads", type=int, default=4)
+    publish_parser.add_argument("--memory-limit", default="8GB")
+    publish_parser.add_argument("--batch-size", type=int, default=20_000)
 
     audit_parser = sub.add_parser("audit", help="法人DB・拡張DB・検索索引・統合DBを読み取り専用で監査")
     audit_parser.add_argument("--search-index", type=_path)
@@ -176,6 +225,43 @@ def _parser() -> argparse.ArgumentParser:
     import_enrichment_parser.add_argument("--file", type=_path, required=True)
     import_enrichment_parser.add_argument("--batch-size", type=int, default=1000)
 
+    discovery_parser = sub.add_parser(
+        "import-website-discovery",
+        help="Web検索adapterの結果を未検証の公式サイト候補として取り込む",
+    )
+    discovery_parser.add_argument("--enrichment-db", type=_path)
+    discovery_parser.add_argument("--file", type=_path, required=True)
+
+    verify_website_parser = sub.add_parser(
+        "verify-website",
+        help="既存の公式サイト候補を明示的な検証後に昇格",
+    )
+    verify_website_parser.add_argument("corporate_number")
+    verify_website_parser.add_argument("url")
+    verify_website_parser.add_argument("--enrichment-db", type=_path)
+    verify_website_parser.add_argument(
+        "--method", choices=tuple(sorted(VERIFICATION_METHODS)), required=True
+    )
+    verify_website_parser.add_argument("--reviewer", required=True)
+    verify_website_parser.add_argument(
+        "--evidence",
+        required=True,
+        help="法人同一性・公式性を確認した根拠（推測ではなく観測事実）",
+    )
+    verify_website_parser.add_argument("--confidence", type=float, default=1.0)
+
+    public_bridge_parser = sub.add_parser(
+        "integrate-public-enrichment",
+        help="公開情報SQLite stagingを証拠DBへ取り込み、runtime/indexへ公開",
+    )
+    public_bridge_parser.add_argument("--staging-db", type=_path, required=True)
+    public_bridge_parser.add_argument("--enrichment-db", type=_path)
+    public_bridge_parser.add_argument("--runtime-db", type=_path)
+    public_bridge_parser.add_argument("--search-index", type=_path)
+    public_bridge_parser.add_argument("--no-publish", action="store_true")
+    public_bridge_parser.add_argument("--threads", type=int, default=4)
+    public_bridge_parser.add_argument("--memory-limit", default="8GB")
+
     claim_parser = sub.add_parser("claim-enrichment", help="拡張タスクをワーカーへリース")
     claim_parser.add_argument("--enrichment-db", type=_path)
     claim_parser.add_argument("--worker-id", required=True)
@@ -191,10 +277,11 @@ def _parser() -> argparse.ArgumentParser:
     complete_parser.add_argument("--enrichment-db", type=_path)
     complete_parser.add_argument(
         "--state",
-        choices=("found", "not_found_after_policy", "not_applicable", "needs_review", "blocked_by_policy", "failed"),
+        choices=("found", "verified", "not_found_after_policy", "not_applicable", "needs_review", "blocked_by_policy", "failed"),
         required=True,
     )
-    complete_parser.add_argument("--worker-id")
+    complete_parser.add_argument("--worker-id", required=True)
+    complete_parser.add_argument("--lease-token", required=True)
     complete_parser.add_argument("--evidence-id")
     complete_parser.add_argument("--error")
 
@@ -209,10 +296,29 @@ def _parser() -> argparse.ArgumentParser:
     sales_ready_parser.add_argument("--max-rows", type=int, default=100_000)
     sales_ready_parser.add_argument("--out", type=_path)
 
-    worker_parser = sub.add_parser("collect-enrichment", help="公式URLを1ページずつ取得し、連絡先を証拠付きで追加")
+    review_contact_parser = sub.add_parser(
+        "review-contact",
+        help="証拠付きcontactの営業利用可否を監査記録付きで判定",
+    )
+    review_contact_parser.add_argument("corporate_number")
+    review_contact_parser.add_argument(
+        "contact_type", choices=("phone", "email", "fax", "form_url")
+    )
+    review_contact_parser.add_argument("value")
+    review_contact_parser.add_argument("--enrichment-db", type=_path)
+    review_contact_parser.add_argument(
+        "--decision", choices=("allowed", "not_allowed"), required=True
+    )
+    review_contact_parser.add_argument("--reviewer", required=True)
+    review_contact_parser.add_argument("--reason", required=True)
+
+    worker_parser = sub.add_parser(
+        "collect-enrichment",
+        help="検証済み公式URLを1回取得し、全連絡先を証拠付きで追加",
+    )
     worker_parser.add_argument("--enrichment-db", type=_path)
     worker_parser.add_argument("--worker-id", required=True)
-    worker_parser.add_argument("--field", choices=("website", "phone", "email", "form_url", "location"))
+    worker_parser.add_argument("--field", choices=("contact_extraction",))
     worker_parser.add_argument("--source-key")
     worker_parser.add_argument("--batch-size", type=int, default=20)
     worker_parser.add_argument("--max-tasks", type=int, default=100)
@@ -436,6 +542,15 @@ def main(argv: list[str] | None = None) -> int:
             if result.artifact_paths:
                 print(f"ローカル原本Parquet: {result.parquet_path} ({len(result.artifact_paths)} tables)")
             return 0
+        if args.command == "import-gbiz-archive":
+            result = import_archive_to_staging(
+                args.archive,
+                args.staging_db,
+                target_industry=args.target_industry,
+                batch_size=args.batch_size,
+            )
+            print(json.dumps(asdict(result), ensure_ascii=False, indent=2, default=str))
+            return 0
         if args.command == "doctor":
             return _doctor(args.db, args.online)
         if args.command == "search":
@@ -480,6 +595,23 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "runtime-summary":
             print(json.dumps(runtime_summary(args.runtime_db), ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "publish-runtime":
+            print(
+                json.dumps(
+                    publish_runtime_bundle(
+                        args.db,
+                        enrichment_path=args.enrichment_db,
+                        runtime_path=args.runtime_db,
+                        search_index_path=args.search_index,
+                        threads=args.threads,
+                        memory_limit=args.memory_limit,
+                        batch_size=args.batch_size,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
             return 0
         if args.command == "audit":
             report = audit_database(
@@ -577,6 +709,55 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.command == "import-website-discovery":
+            print(
+                json.dumps(
+                    import_discovery_jsonl(
+                        args.db,
+                        args.file,
+                        enrichment_path=args.enrichment_db,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
+        if args.command == "verify-website":
+            print(
+                json.dumps(
+                    verify_website_candidate(
+                        args.db,
+                        enrichment_path=args.enrichment_db,
+                        corporate_number=args.corporate_number,
+                        url=args.url,
+                        verification_method=args.method,
+                        reviewer=args.reviewer,
+                        identity_evidence=args.evidence,
+                        confidence=args.confidence,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
+        if args.command == "integrate-public-enrichment":
+            print(
+                json.dumps(
+                    integrate_public_enrichment(
+                        args.staging_db,
+                        args.db,
+                        enrichment_path=args.enrichment_db,
+                        runtime_path=args.runtime_db,
+                        search_index_path=args.search_index,
+                        publish=not args.no_publish,
+                        threads=args.threads,
+                        memory_limit=args.memory_limit,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
         if args.command == "claim-enrichment":
             print(
                 json.dumps(
@@ -603,6 +784,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_key=args.source_key,
                 state=args.state,
                 worker_id=args.worker_id,
+                lease_token=args.lease_token,
                 evidence_id=args.evidence_id,
                 error=args.error,
             )
@@ -633,6 +815,24 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps({"rows": len(rows), "out": str(args.out)}, ensure_ascii=False, indent=2))
             else:
                 print(json.dumps([dict(zip(columns, row)) for row in rows], ensure_ascii=False, default=str, indent=2))
+            return 0
+        if args.command == "review-contact":
+            print(
+                json.dumps(
+                    review_contact(
+                        args.db,
+                        enrichment_path=args.enrichment_db,
+                        corporate_number=args.corporate_number,
+                        contact_type=args.contact_type,
+                        value=args.value,
+                        decision=args.decision,
+                        reviewer=args.reviewer,
+                        reason=args.reason,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
             return 0
         if args.command == "establishment-list":
             columns, rows = export_establishment_contacts(
@@ -682,6 +882,9 @@ def main(argv: list[str] | None = None) -> int:
         OSError,
         ValueError,
         SemanticIndexError,
+        GBizArchiveError,
+        PublishError,
+        SearchIndexError,
     ) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

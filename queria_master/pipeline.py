@@ -15,6 +15,7 @@ from typing import Any, Mapping
 from uuid import uuid4
 
 from . import __version__
+from .enrichment import _WriterLock
 from .resources import (
     ALL_PUBLIC_SCOPE,
     DEFAULT_CACHE,
@@ -48,6 +49,17 @@ PROJECT_VERSION = __version__
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _promote_database(temp_db: Path, database_path: Path) -> None:
+    """Replace a canonical DB while holding the lock shared with publication."""
+
+    lock = _WriterLock(database_path, timeout_seconds=120.0)
+    lock.acquire()
+    try:
+        os.replace(temp_db, database_path)
+    finally:
+        lock.release()
 
 
 def _duckdb_module():
@@ -421,7 +433,7 @@ def build_local_database(
             temp_wal.unlink(missing_ok=True)
 
     try:
-        os.replace(temp_db, database_path)
+        _promote_database(temp_db, database_path)
     except PermissionError as exc:
         raise PipelineError(
             f"DB を置換できません。{database_path} を開いている DuckDB/BI ツールを閉じて再実行してください。"
@@ -1306,7 +1318,7 @@ def build_all_public_database(
             temp_wal.unlink(missing_ok=True)
 
     try:
-        os.replace(temp_db, database_path)
+        _promote_database(temp_db, database_path)
     except PermissionError as exc:
         raise PipelineError(
             f"DB を置換できません。{database_path} を開いている DuckDB/BI ツールを閉じて再実行してください。"

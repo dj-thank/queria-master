@@ -1,40 +1,15 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import shutil
 import stat
 import zipfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-SKIP_PARTS = {".git", ".venv", "__pycache__", ".pytest_cache", "build", "dist"}
-SKIP_FILES = {"MANIFEST.sha256"}
-GENERATED_DIRS = {"data", "cache", "exports"}
-KEEP_IN_GENERATED_DIRS = {"README.md", ".gitkeep"}
-
-
-def is_release_file(path: Path) -> bool:
-    relative = path.relative_to(ROOT)
-    if not path.is_file() or path.name in SKIP_FILES:
-        return False
-    if any(part in SKIP_PARTS or part.endswith(".egg-info") for part in relative.parts):
-        return False
-    if relative.parts and relative.parts[0] in GENERATED_DIRS and path.name not in KEEP_IN_GENERATED_DIRS:
-        return False
-    return True
-
-
-def release_files() -> list[Path]:
-    return [path for path in sorted(ROOT.rglob("*")) if is_release_file(path)]
-
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while block := handle.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
+try:
+    from .verify_package import ROOT, package_files as release_files, sha256
+except ImportError:  # Direct script execution.
+    from verify_package import ROOT, package_files as release_files, sha256
 
 
 def sync_assets() -> None:

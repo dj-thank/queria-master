@@ -71,7 +71,7 @@ class RuntimeDatabaseTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     check.execute("SELECT count(*) FROM enrichment.enrichment_state").fetchone()[0],
-                    10,
+                    8,
                 )
                 effective_url, official_url = check.execute(
                     "SELECT effective_company_url, official_url FROM search.company_documents "

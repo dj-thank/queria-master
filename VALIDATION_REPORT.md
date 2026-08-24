@@ -1,5 +1,9 @@
 # 検証レポート 0.5.0 — 全量拡張スナップショット
 
+> これは0.5.0時点の履歴レポートです。現行の履歴gBiz archive importer、
+> enrichment公開パイプライン、v0.10.0デスクトップ、現在の配布ZIPの検証証拠では
+> ありません。現行機能の主張には最新CI結果と各component runbookを使用してください。
+
 検証日: 2026-08-19
 対象: Queria Master 0.5.0 / `all-public`
 

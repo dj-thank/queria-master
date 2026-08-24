@@ -23,7 +23,7 @@ from .resources import DEFAULT_DB, PROJECT_ROOT
 
 
 DEFAULT_RUNTIME_DB = PROJECT_ROOT / "data" / "queria_runtime.duckdb"
-RUNTIME_SCHEMA_VERSION = "2"
+RUNTIME_SCHEMA_VERSION = "5"
 
 
 class RuntimeBuildError(RuntimeError):
@@ -175,35 +175,34 @@ def _materialize_search_profile(con: Any) -> dict[str, Any]:
         WITH contact_values AS (
             SELECT
                 corporate_number,
-                max(value_normalized) FILTER (WHERE contact_type = 'phone' AND status IN ('found', 'verified')) AS phone,
-                max(value_normalized) FILTER (WHERE contact_type = 'email' AND status IN ('found', 'verified')) AS email,
-                max(value_normalized) FILTER (WHERE contact_type = 'form_url' AND status IN ('found', 'verified')) AS inquiry_form_url,
-                max(sales_eligibility) FILTER (WHERE contact_type = 'phone' AND status IN ('found', 'verified')) AS phone_sales_eligibility,
-                max(sales_eligibility) FILTER (WHERE contact_type = 'email' AND status IN ('found', 'verified')) AS email_sales_eligibility
-            FROM enrichment.company_contact_points
-            WHERE status IN ('found', 'verified')
-              AND sales_eligibility = 'allowed'
+                max(value_normalized) FILTER (WHERE contact_type = 'phone') AS phone,
+                max(value_normalized) FILTER (WHERE contact_type = 'email') AS email,
+                max(value_normalized) FILTER (WHERE contact_type = 'form_url') AS inquiry_form_url,
+                max(source_evidence_id) FILTER (WHERE contact_type = 'phone') AS phone_source_evidence_id,
+                max(source_url) FILTER (WHERE contact_type = 'phone') AS phone_source_url,
+                max(status) FILTER (WHERE contact_type = 'phone') AS phone_status,
+                max(confidence) FILTER (WHERE contact_type = 'phone') AS phone_confidence,
+                max(source_evidence_id) FILTER (WHERE contact_type = 'email') AS email_source_evidence_id,
+                max(source_url) FILTER (WHERE contact_type = 'email') AS email_source_url,
+                max(status) FILTER (WHERE contact_type = 'email') AS email_status,
+                max(confidence) FILTER (WHERE contact_type = 'email') AS email_confidence,
+                max(sales_eligibility) FILTER (WHERE contact_type = 'phone') AS phone_sales_eligibility,
+                max(sales_eligibility) FILTER (WHERE contact_type = 'email') AS email_sales_eligibility
+            FROM crm.v_resolved_company_contacts
             GROUP BY corporate_number
         ), websites AS (
-            SELECT corporate_number, normalized_url AS official_url
-            FROM enrichment.company_websites
-            WHERE status = 'verified'
-              AND website_role = 'official_homepage'
-            QUALIFY row_number() OVER (
-                PARTITION BY corporate_number
-                ORDER BY confidence DESC NULLS LAST, checked_at DESC NULLS LAST, first_seen_at DESC
-            ) = 1
+            SELECT corporate_number, official_url, source_evidence_id,
+                   status, confidence, checked_at
+            FROM crm.v_resolved_company_websites
         ), locations AS (
             SELECT corporate_number, address_normalized AS resolved_address,
                    postal_code AS resolved_postal_code,
                    prefecture_name AS resolved_prefecture_name,
-                   city_name AS resolved_city_name
-            FROM enrichment.company_locations
-            WHERE status IN ('found', 'verified')
-            QUALIFY row_number() OVER (
-                PARTITION BY corporate_number
-                ORDER BY confidence DESC NULLS LAST, observed_at DESC
-            ) = 1
+                   city_name AS resolved_city_name,
+                   source_evidence_id AS location_source_evidence_id,
+                   status AS location_status,
+                   confidence AS location_confidence
+            FROM crm.v_resolved_company_locations
         )
         SELECT
             c.*,
@@ -213,9 +212,23 @@ def _materialize_search_profile(con: Any) -> dict[str, Any]:
             coalesce(l.resolved_city_name, c.city_name) AS resolved_city_name,
             coalesce(w.official_url, c.company_url) AS effective_company_url,
             w.official_url,
+            w.source_evidence_id AS official_url_source_evidence_id,
+            w.status AS official_url_status,
+            w.confidence AS official_url_confidence,
             a.phone,
             a.email,
             a.inquiry_form_url,
+            a.phone_source_evidence_id,
+            a.phone_source_url,
+            a.phone_status,
+            a.phone_confidence,
+            a.email_source_evidence_id,
+            a.email_source_url,
+            a.email_status,
+            a.email_confidence,
+            l.location_source_evidence_id,
+            l.location_status,
+            l.location_confidence,
             a.phone_sales_eligibility,
             a.email_sales_eligibility,
             coalesce(cov.website_state, 'pending') AS enrichment_website_state,
@@ -265,6 +278,30 @@ def _materialize_search_profile(con: Any) -> dict[str, Any]:
     }
 
 
+def _optional_source_identity(con: Any, query: str) -> str | None:
+    try:
+        row = con.execute(query).fetchone()
+    except Exception:
+        return None
+    if row is None or row[0] is None:
+        return None
+    return _canonical_source_identity(row[0])
+
+
+def _canonical_source_identity(value: Any) -> str | None:
+    """Return a timezone-independent representation for source revisions."""
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        value = value.astimezone(timezone.utc)
+        return value.isoformat()
+    text = str(value).strip()
+    return text or None
+
+
 def _manifest(con: Any, canonical_path: Path, enrichment_path: Path, copied: list[dict[str, Any]]) -> dict[str, Any]:
     company_count = int(con.execute("SELECT count(*) FROM core.companies").fetchone()[0])
     state_count = int(con.execute("SELECT count(*) FROM enrichment.enrichment_state").fetchone()[0])
@@ -274,8 +311,17 @@ def _manifest(con: Any, canonical_path: Path, enrichment_path: Path, copied: lis
         "built_at": datetime.now(timezone.utc).isoformat(),
         "canonical_database": str(canonical_path),
         "canonical_bytes": canonical_path.stat().st_size,
+        "canonical_refresh_id": _optional_source_identity(
+            con,
+            "SELECT refresh_id FROM canonical.meta.refresh_log ORDER BY rowid DESC LIMIT 1",
+        ),
         "enrichment_database": str(enrichment_path),
         "enrichment_bytes": enrichment_path.stat().st_size,
+        "enrichment_revision": _optional_source_identity(
+            con,
+            "SELECT initialized_at FROM enrichment_src.enrichment.schema_meta "
+            "WHERE schema_name = 'enrichment' LIMIT 1",
+        ),
         "company_count": company_count,
         "enrichment_state_count": state_count,
         "copied_tables": copied,
@@ -426,6 +472,7 @@ def runtime_summary(runtime_path: Path = DEFAULT_RUNTIME_DB) -> dict[str, Any]:
             "enrichment_state": optional_count("enrichment.enrichment_state"),
             "evidence_documents": optional_count("enrichment.evidence_documents"),
             "contact_points": optional_count("enrichment.company_contact_points"),
+            "resolved_contacts": optional_count("crm.v_resolved_company_contacts"),
             "establishments": optional_count("enrichment.company_establishments"),
             "websites": optional_count("enrichment.company_websites"),
             "locations": optional_count("enrichment.company_locations"),

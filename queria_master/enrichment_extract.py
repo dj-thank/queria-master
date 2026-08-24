@@ -9,16 +9,18 @@ content digest so the importer can retain an auditable evidence trail.
 """
 
 import hashlib
+import http.client
+import ipaddress
 import json
 import re
-import urllib.error
-import urllib.request
+import socket
+import ssl
 import urllib.robotparser
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
-from typing import Any, Iterable, Mapping
-from urllib.parse import urljoin, urlsplit
+from typing import Any, Iterable, Mapping, Sequence
+from urllib.parse import quote, urljoin, urlsplit
 
 from .enrichment import (
     EnrichmentError,
@@ -28,10 +30,14 @@ from .enrichment import (
     normalize_contact,
     normalize_url,
 )
+from .website_discovery import validate_public_website_url
 
 
 EXTRACTOR_VERSION = "html-contact-v1"
 DEFAULT_USER_AGENT = "queria-master-enrichment/0.7 (+public-data-contact-research)"
+MAX_REDIRECTS = 5
+MAX_DNS_ADDRESSES = 32
+MAX_ROBOTS_BYTES = 512_000
 _EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE)
 _PHONE_RE = re.compile(r"(?:\+81|0)[0-9０-９\s\-‐‑‒–—−ー()（）]{7,}[0-9０-９]")
 _CONTACT_HINT_RE = re.compile(
@@ -62,6 +68,18 @@ class FetchedPage:
     robots_status: str
     retrieved_at: str
     error: str | None = None
+
+
+class NetworkPolicyError(EnrichmentError):
+    """A URL or resolved destination violates the outbound network policy."""
+
+
+@dataclass(frozen=True)
+class _HttpResult:
+    final_url: str
+    status: int
+    headers: Mapping[str, str]
+    body: bytes
 
 
 class _PageParser(HTMLParser):
@@ -341,18 +359,231 @@ def _deduplicate_records(records: Iterable[Mapping[str, Any]]) -> list[dict[str,
     return result
 
 
+def _policy_url(value: str) -> str:
+    try:
+        return validate_public_website_url(value)
+    except EnrichmentError as exc:
+        raise NetworkPolicyError(str(exc)) from exc
+
+
+def _verified_host(value: str) -> str:
+    host = (urlsplit(value).hostname or "").strip(".").casefold()
+    return host.removeprefix("www.")
+
+
+def _resolve_public_targets(url: str) -> tuple[str, list[tuple[int, str]]]:
+    """Resolve once, reject mixed/private answers, and return pinned targets."""
+
+    normalized = _policy_url(url)
+    parts = urlsplit(normalized)
+    host = parts.hostname or ""
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        literal = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(
+                host,
+                port,
+                type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+            )
+        except OSError as exc:
+            raise OSError(f"DNS解決に失敗しました: {host}") from exc
+        targets: list[tuple[int, str]] = []
+        for family, _socktype, _proto, _canonname, sockaddr in infos:
+            if family not in {socket.AF_INET, socket.AF_INET6}:
+                continue
+            address_text = str(sockaddr[0]).split("%", 1)[0]
+            try:
+                address = ipaddress.ip_address(address_text)
+            except ValueError as exc:
+                raise NetworkPolicyError(f"DNS応答のIPアドレスが不正です: {address_text}") from exc
+            if not address.is_global:
+                raise NetworkPolicyError(
+                    f"DNS応答に公開範囲外のIPアドレスが含まれます: {address}"
+                )
+            item = (family, str(address))
+            if item not in targets:
+                targets.append(item)
+            if len(targets) > MAX_DNS_ADDRESSES:
+                raise NetworkPolicyError("DNS応答のアドレス数が上限を超えました。")
+        if not targets:
+            raise NetworkPolicyError("DNS応答に接続可能な公開IPアドレスがありません。")
+        return normalized, targets
+    if not literal.is_global:
+        raise NetworkPolicyError(f"公開範囲外のIPアドレスには接続できません: {literal}")
+    family = socket.AF_INET6 if literal.version == 6 else socket.AF_INET
+    return normalized, [(family, str(literal))]
+
+
+def _pinned_connection(
+    url: str,
+    *,
+    family: int,
+    address: str,
+    timeout: float,
+) -> http.client.HTTPConnection:
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    if parts.scheme == "https":
+        connection: http.client.HTTPConnection = http.client.HTTPSConnection(
+            host,
+            port,
+            timeout=timeout,
+            context=ssl.create_default_context(),
+        )
+    else:
+        connection = http.client.HTTPConnection(host, port, timeout=timeout)
+
+    def create_connection(
+        _destination: tuple[str, int],
+        socket_timeout: float | object = timeout,
+        source_address: tuple[str, int] | None = None,
+    ) -> socket.socket:
+        effective_timeout = timeout if not isinstance(socket_timeout, (int, float)) else socket_timeout
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(float(effective_timeout))
+            if source_address is not None:
+                sock.bind(source_address)
+            destination: tuple[Any, ...]
+            if family == socket.AF_INET6:
+                destination = (address, port, 0, 0)
+            else:
+                destination = (address, port)
+            sock.connect(destination)
+            return sock
+        except Exception:
+            sock.close()
+            raise
+
+    # Keep the logical hostname on the connection for Host, TLS SNI, and
+    # certificate verification, but connect only to the address just checked.
+    connection._create_connection = create_connection  # type: ignore[attr-defined]
+    return connection
+
+
+def _request_target(url: str) -> str:
+    parts = urlsplit(url)
+    path = quote(parts.path or "/", safe="/%:@!$&'()*+,;=-._~")
+    if parts.query:
+        path += "?" + quote(parts.query, safe="=&?/:;+,%@!$'()*-._~")
+    return path
+
+
+def _request_once(
+    url: str,
+    *,
+    targets: Sequence[tuple[int, str]],
+    user_agent: str,
+    accept: str,
+    timeout: float,
+    max_bytes: int,
+) -> _HttpResult:
+    last_error: Exception | None = None
+    for family, address in targets:
+        connection = _pinned_connection(
+            url,
+            family=family,
+            address=address,
+            timeout=timeout,
+        )
+        try:
+            connection.request(
+                "GET",
+                _request_target(url),
+                headers={"User-Agent": user_agent, "Accept": accept, "Connection": "close"},
+            )
+            response = connection.getresponse()
+            content_length = response.getheader("Content-Length")
+            if content_length is not None:
+                try:
+                    if int(content_length) > max_bytes:
+                        raise EnrichmentError(f"response exceeded max_bytes={max_bytes}")
+                except ValueError as exc:
+                    raise EnrichmentError("Content-Lengthが不正です。") from exc
+            body = response.read(max_bytes + 1)
+            if len(body) > max_bytes:
+                raise EnrichmentError(f"response exceeded max_bytes={max_bytes}")
+            headers = {key.casefold(): value for key, value in response.getheaders()}
+            return _HttpResult(url, int(response.status), headers, body)
+        except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
+            last_error = exc
+        finally:
+            connection.close()
+    if last_error is not None:
+        raise OSError(f"公開サイトへ接続できません: {last_error}") from last_error
+    raise OSError("公開サイトの接続先がありません。")
+
+
+def _redirect_target(current_url: str, location: str, expected_host: str) -> str:
+    if not location.strip():
+        raise EnrichmentError("redirectにLocationがありません。")
+    target = _policy_url(urljoin(current_url, location))
+    if _verified_host(target) != expected_host:
+        raise NetworkPolicyError("検証済み公式サイトと異なるhostへのredirectを拒否しました。")
+    if urlsplit(current_url).scheme == "https" and urlsplit(target).scheme != "https":
+        raise NetworkPolicyError("HTTPSからHTTPへのredirectを拒否しました。")
+    return target
+
+
+def _bounded_get(
+    url: str,
+    *,
+    expected_host: str,
+    user_agent: str,
+    accept: str,
+    timeout: float,
+    max_bytes: int,
+) -> _HttpResult:
+    current = _policy_url(url)
+    for redirect_count in range(MAX_REDIRECTS + 1):
+        current, targets = _resolve_public_targets(current)
+        if _verified_host(current) != expected_host:
+            raise NetworkPolicyError("検証済み公式サイトと異なるhostへの接続を拒否しました。")
+        result = _request_once(
+            current,
+            targets=targets,
+            user_agent=user_agent,
+            accept=accept,
+            timeout=timeout,
+            max_bytes=max_bytes,
+        )
+        if result.status not in {301, 302, 303, 307, 308}:
+            return result
+        if redirect_count >= MAX_REDIRECTS:
+            raise EnrichmentError("redirect回数が上限を超えました。")
+        current = _redirect_target(current, result.headers.get("location", ""), expected_host)
+    raise AssertionError("redirect loop must return or raise")
+
+
 def _robots_allowed(url: str, user_agent: str, timeout: float) -> tuple[bool, str]:
     parts = urlsplit(url)
     robots_url = f"{parts.scheme}://{parts.netloc}/robots.txt"
     parser = urllib.robotparser.RobotFileParser()
     parser.set_url(robots_url)
     try:
-        request = urllib.request.Request(robots_url, headers={"User-Agent": user_agent})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read(512_000).decode("utf-8", errors="replace")
-        parser.parse(body.splitlines())
-        return parser.can_fetch(user_agent, url), "allowed" if parser.can_fetch(user_agent, url) else "blocked"
-    except (OSError, urllib.error.URLError, ValueError):
+        result = _bounded_get(
+            robots_url,
+            expected_host=_verified_host(url),
+            user_agent=user_agent,
+            accept="text/plain,*/*;q=0.1",
+            timeout=timeout,
+            max_bytes=MAX_ROBOTS_BYTES,
+        )
+        if result.status == 404:
+            parser.parse([])
+        elif 200 <= result.status < 300:
+            parser.parse(result.body.decode("utf-8", errors="replace").splitlines())
+        else:
+            return False, "unavailable"
+        allowed = parser.can_fetch(user_agent, url)
+        return allowed, "allowed" if allowed else "blocked"
+    except NetworkPolicyError:
+        raise
+    except (EnrichmentError, OSError, ValueError):
         return False, "unavailable"
 
 
@@ -368,55 +599,86 @@ def fetch_official_page(
 
     if timeout <= 0 or max_bytes < 1024:
         raise EnrichmentError("timeoutは正数、max_bytesは1024以上で指定してください。")
-    requested_url = normalize_url(page_url)
     retrieved_at = _now()
-    if respect_robots:
-        allowed, robots_status = _robots_allowed(requested_url, user_agent, timeout)
-        if not allowed:
-            return FetchedPage(
-                requested_url,
-                None,
-                None,
-                None,
-                None,
-                "blocked" if robots_status == "blocked" else "unavailable",
-                retrieved_at,
-                "robots.txt policy did not permit a fetch" if robots_status == "blocked" else "robots.txt unavailable",
-            )
-    else:
-        robots_status = "not_checked"
-    request = urllib.request.Request(
-        requested_url,
-        headers={
-            "User-Agent": user_agent,
-            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
-        },
-    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read(max_bytes + 1)
-            final_url = normalize_url(response.geturl())
-            content_type = response.headers.get("Content-Type")
-            status = getattr(response, "status", None)
-        if len(raw) > max_bytes:
+        requested_url = _policy_url(page_url)
+        expected_host = _verified_host(requested_url)
+        if respect_robots:
+            allowed, robots_status = _robots_allowed(requested_url, user_agent, timeout)
+            if not allowed:
+                return FetchedPage(
+                    requested_url,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "blocked" if robots_status == "blocked" else "unavailable",
+                    retrieved_at,
+                    "robots.txt policy did not permit a fetch"
+                    if robots_status == "blocked"
+                    else "robots.txt unavailable",
+                )
+        else:
+            robots_status = "not_checked"
+        result = _bounded_get(
+            requested_url,
+            expected_host=expected_host,
+            user_agent=user_agent,
+            accept="text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
+            timeout=timeout,
+            max_bytes=max_bytes,
+        )
+        content_type = result.headers.get("content-type")
+        if not 200 <= result.status < 300:
             return FetchedPage(
                 requested_url,
-                final_url,
+                result.final_url,
                 None,
-                status,
+                result.status,
                 content_type,
                 robots_status,
                 retrieved_at,
-                f"response exceeded max_bytes={max_bytes}",
+                f"HTTP status {result.status}",
+            )
+        media_type = (content_type or "").split(";", 1)[0].strip().casefold()
+        if media_type and media_type not in {"text/html", "application/xhtml+xml"}:
+            return FetchedPage(
+                requested_url,
+                result.final_url,
+                None,
+                result.status,
+                content_type,
+                robots_status,
+                retrieved_at,
+                f"HTMLではないContent-Typeです: {media_type}",
             )
         charset_match = re.search(r"charset=([^;\s]+)", content_type or "", re.IGNORECASE)
         encoding = charset_match.group(1).strip(' \"\'') if charset_match else "utf-8"
         try:
-            html = raw.decode(encoding, errors="replace")
+            html = result.body.decode(encoding, errors="replace")
         except LookupError:
-            html = raw.decode("utf-8", errors="replace")
-        return FetchedPage(requested_url, final_url, html, status, content_type, robots_status, retrieved_at)
-    except (OSError, urllib.error.URLError, ValueError) as exc:
+            html = result.body.decode("utf-8", errors="replace")
+        return FetchedPage(
+            requested_url,
+            result.final_url,
+            html,
+            result.status,
+            content_type,
+            robots_status,
+            retrieved_at,
+        )
+    except NetworkPolicyError as exc:
+        return FetchedPage(
+            str(page_url),
+            None,
+            None,
+            None,
+            None,
+            "network_blocked",
+            retrieved_at,
+            str(exc),
+        )
+    except (EnrichmentError, OSError, ValueError) as exc:
         return FetchedPage(requested_url, None, None, None, None, robots_status, retrieved_at, str(exc))
 
 
@@ -448,10 +710,18 @@ def fetch_and_extract_page(
                 "source_key": source_key,
                 "source_url": page.requested_url,
                 "retrieved_at": page.retrieved_at,
-                "state": "blocked_by_policy" if page.robots_status == "blocked" else "needs_review",
+                "state": "blocked_by_policy"
+                if page.robots_status in {"blocked", "network_blocked"}
+                else "needs_review",
                 "error": page.error,
                 "robots_status": page.robots_status,
-                "policy_code": "robots_disallow" if page.robots_status == "blocked" else "fetch_failed",
+                "policy_code": (
+                    "robots_disallow"
+                    if page.robots_status == "blocked"
+                    else "network_destination_blocked"
+                    if page.robots_status == "network_blocked"
+                    else "fetch_failed"
+                ),
                 "extractor_version": EXTRACTOR_VERSION,
             }
         ]
@@ -473,6 +743,7 @@ __all__ = [
     "DEFAULT_USER_AGENT",
     "EXTRACTOR_VERSION",
     "FetchedPage",
+    "NetworkPolicyError",
     "extract_contact_records",
     "fetch_and_extract_page",
     "fetch_official_page",

@@ -2,6 +2,7 @@ mod codex;
 mod db;
 mod duckdb_native;
 mod models;
+mod public_enrichment;
 mod salesforce;
 
 use anyhow::Context;
@@ -10,6 +11,9 @@ use db::Db;
 use models::{
     CodexStatus, Company, DataStatus, ResearchReport, SalesforceStatus, SavedSearch, SearchPlan,
     SearchResult,
+};
+use public_enrichment::{
+    PublicEnrichmentManager, PublicEnrichmentOperation, PublicEnrichmentStatus,
 };
 use regex::Regex;
 use salesforce::SalesforceManager;
@@ -22,6 +26,7 @@ use url::Url;
 struct AppState {
     db: Db,
     codex: CodexManager,
+    public_enrichment: PublicEnrichmentManager,
     salesforce: SalesforceManager,
 }
 
@@ -107,6 +112,76 @@ fn find_search_index(runtime_path: Option<&Path>) -> Option<PathBuf> {
             None
         }
     })
+}
+
+fn find_runtime_target(app_data_dir: &Path) -> PathBuf {
+    if let Ok(path) = std::env::var("QUERIA_RUNTIME_DB") {
+        return PathBuf::from(path);
+    }
+    if let Ok(home) = std::env::var("QUERIA_MASTER_HOME") {
+        return PathBuf::from(home).join("data/queria_runtime.duckdb");
+    }
+    default_runtime_target(app_data_dir)
+}
+
+fn default_runtime_target(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("data").join("queria_runtime.duckdb")
+}
+
+fn find_canonical_db(
+    existing_runtime_path: Option<&Path>,
+    runtime_target: Option<&Path>,
+) -> Option<PathBuf> {
+    // The canonical enrichment publisher consumes core.companies. A v0.10 G
+    // runtime remains a valid read fallback, but its core.g_companies source
+    // is not advertised as publish-capable through this bridge.
+    let mut candidates = Vec::new();
+    if let Ok(path) = std::env::var("QUERIA_CANONICAL_DB") {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Ok(home) = std::env::var("QUERIA_MASTER_HOME") {
+        candidates.push(PathBuf::from(home).join("data/queria_master.duckdb"));
+    }
+    for runtime_path in [existing_runtime_path, runtime_target]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(parent) = runtime_path.parent() {
+            candidates.push(parent.join("queria_master.duckdb"));
+        }
+    }
+    if let Ok(current_dir) = std::env::current_dir() {
+        for root in current_dir.ancestors().take(3) {
+            candidates.push(root.join("data/queria_master.duckdb"));
+        }
+    }
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn find_enrichment_target(runtime_path: &Path) -> PathBuf {
+    if let Ok(path) = std::env::var("QUERIA_ENRICHMENT_DB") {
+        return PathBuf::from(path);
+    }
+    if let Ok(home) = std::env::var("QUERIA_MASTER_HOME") {
+        return PathBuf::from(home).join("data/queria_enrichment.duckdb");
+    }
+    runtime_path
+        .parent()
+        .map(|parent| parent.join("queria_enrichment.duckdb"))
+        .unwrap_or_else(|| PathBuf::from("queria_enrichment.duckdb"))
+}
+
+fn find_search_index_target(runtime_path: &Path) -> PathBuf {
+    if let Ok(path) = std::env::var("QUERIA_SEARCH_INDEX") {
+        return PathBuf::from(path);
+    }
+    if let Ok(home) = std::env::var("QUERIA_MASTER_HOME") {
+        return PathBuf::from(home).join("data/search.sqlite");
+    }
+    runtime_path
+        .parent()
+        .map(|parent| parent.join("search.sqlite"))
+        .unwrap_or_else(|| PathBuf::from("search.sqlite"))
 }
 
 #[tauri::command]
@@ -345,6 +420,56 @@ async fn import_industry_taxonomy(state: State<'_, AppState>, path: String) -> R
 }
 
 #[tauri::command]
+async fn public_enrichment_status(
+    state: State<'_, AppState>,
+) -> Result<PublicEnrichmentStatus, String> {
+    Ok(state.public_enrichment.status().await)
+}
+
+#[tauri::command]
+async fn public_enrichment_prepare(
+    state: State<'_, AppState>,
+    source_path: String,
+    sheet_name: Option<String>,
+    replace: bool,
+) -> Result<PublicEnrichmentOperation, String> {
+    state
+        .public_enrichment
+        .prepare(
+            std::path::Path::new(&source_path),
+            sheet_name.as_deref(),
+            replace,
+        )
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn public_enrichment_make_assignment(
+    state: State<'_, AppState>,
+    output_path: String,
+    chunk_size: u32,
+) -> Result<PublicEnrichmentOperation, String> {
+    state
+        .public_enrichment
+        .make_assignment(std::path::Path::new(&output_path), chunk_size)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn public_enrichment_run_all(
+    state: State<'_, AppState>,
+    input_dir: String,
+) -> Result<PublicEnrichmentOperation, String> {
+    state
+        .public_enrichment
+        .run_all(std::path::Path::new(&input_dir), false)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
 async fn salesforce_status(state: State<'_, AppState>) -> Result<SalesforceStatus, String> {
     Ok(state.salesforce.status().await)
 }
@@ -408,11 +533,21 @@ pub fn run() {
             let db_path = app_data_dir.join("company-master.duckdb");
             let runtime_path = find_runtime_db();
             let search_index_path = find_search_index(runtime_path.as_deref());
-            let db = match runtime_path {
-                Some(runtime_path) => Db::with_runtime(db_path, runtime_path),
-                None => Db::new(db_path),
+            let runtime_target = find_runtime_target(&app_data_dir);
+            let canonical_path =
+                find_canonical_db(runtime_path.as_deref(), Some(runtime_target.as_path()));
+            let enrichment_path = find_enrichment_target(&runtime_target);
+            let search_index_target = find_search_index_target(&runtime_target);
+            if let Some(parent) = runtime_target
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent)?;
             }
-            .with_search_index(search_index_path);
+            let db = Db::with_runtime(db_path, runtime_target.clone())
+                .with_runtime_fallback(runtime_path.clone())
+                .with_search_index(Some(search_index_target.clone()))
+                .with_search_index_fallback(search_index_path.clone());
             db.init()
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
@@ -434,11 +569,21 @@ pub fn run() {
             )?;
 
             let codex = CodexManager::new(app_data_dir.clone(), workspace);
+            let public_enrichment = PublicEnrichmentManager::new(
+                app_data_dir.clone(),
+                resource_dir.clone(),
+                canonical_path,
+                Some(enrichment_path),
+                Some(runtime_target),
+                Some(search_index_target),
+            )
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
             let salesforce = SalesforceManager::new()
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
             app.manage(AppState {
                 db,
                 codex,
+                public_enrichment,
                 salesforce,
             });
             Ok(())
@@ -463,6 +608,10 @@ pub fn run() {
             sync_duckdb_company_master,
             import_company_file,
             import_industry_taxonomy,
+            public_enrichment_status,
+            public_enrichment_prepare,
+            public_enrichment_make_assignment,
+            public_enrichment_run_all,
             salesforce_status,
             salesforce_login_start,
             salesforce_upsert_list,
@@ -740,6 +889,15 @@ fn normalize_phone(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_publication_target_is_under_app_data() {
+        let app_data_dir = Path::new("app-data");
+        assert_eq!(
+            default_runtime_target(app_data_dir),
+            app_data_dir.join("data").join("queria_runtime.duckdb")
+        );
+    }
 
     #[test]
     fn ssrf_guard_rejects_private_reserved_and_transition_addresses() {

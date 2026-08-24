@@ -9,6 +9,7 @@ description = "Load Queria public corporate and adjacent data into a local DuckD
 requires-python = ">=3.10"
 dependencies = [
   "duckdb>=1.5.5,<2",
+  "openpyxl>=3.1,<4",
   "queria>=0.21.0,<1",
 ]
 

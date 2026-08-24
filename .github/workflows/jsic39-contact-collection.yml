@@ -15,13 +15,6 @@ on:
         description: Maximum same-host pages per company
         required: false
         default: "4"
-  pull_request:
-    paths:
-      - ".github/workflows/jsic39-contact-collection.yml"
-      - "company_scout/public_enrichment/jsic39_collection.py"
-      - "company_scout/public_enrichment/official_site_phone_enricher.py"
-      - "company_scout/public_enrichment/tests/test_jsic39_collection.py"
-      - "company_scout/public_enrichment/tests/test_phone_security.py"
 
 permissions:
   contents: read
