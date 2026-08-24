@@ -36,9 +36,15 @@ def main() -> int:
     output = args.output.resolve()
     rendered = render_manifest()
     if args.check:
-        if not output.is_file() or output.read_text(encoding="utf-8") != rendered:
+        current = output.read_text(encoding="utf-8") if output.is_file() else ""
+        if current != rendered:
+            current_lines = set(current.splitlines())
+            rendered_lines = set(rendered.splitlines())
+            stale = sorted(current_lines - rendered_lines)
+            missing = sorted(rendered_lines - current_lines)
             print(
-                f"FAIL: {output} is stale; run {Path(__file__).name} to regenerate it",
+                f"FAIL: {output} is stale; run {Path(__file__).name} to regenerate it; "
+                f"stale={stale[:5]}, missing={missing[:5]}",
                 file=sys.stderr,
             )
             return 1
