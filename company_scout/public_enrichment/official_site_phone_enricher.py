@@ -614,7 +614,9 @@ def load_progress(path: Path) -> tuple[dict[str, dict[str, Any]], int]:
     """Load the latest record per company, tolerating one truncated tail line."""
     if not path.is_file():
         return {}, 0
-    lines = path.read_text(encoding="utf-8").splitlines()
+    # JSON strings may legally contain U+2028/U+2029. str.splitlines() treats
+    # them as record boundaries, while JSONL uses the LF byte only.
+    lines = path.read_text(encoding="utf-8").split("\n")
     latest: dict[str, dict[str, Any]] = {}
     ignored_tail_lines = 0
     for index, line in enumerate(lines):

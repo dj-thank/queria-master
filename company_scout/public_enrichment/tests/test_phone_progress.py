@@ -14,6 +14,36 @@ import official_site_phone_enricher as phone
 
 
 class PhoneProgressTests(unittest.TestCase):
+    def test_unicode_line_separator_inside_json_string_is_not_a_record_boundary(self) -> None:
+        records = [
+            {
+                "schema_version": 2,
+                "corporate_number": "1000000000001",
+                "official_site_url": "https://alpha.example/",
+                "state": "processed_no_phone",
+                "reason": "first\u2028continued",
+                "candidates": [],
+            },
+            {
+                "schema_version": 2,
+                "corporate_number": "1000000000002",
+                "official_site_url": "https://beta.example/",
+                "state": "processed_no_phone",
+                "candidates": [],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            progress = Path(temp) / "progress.jsonl"
+            progress.write_text(
+                "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
+                encoding="utf-8",
+            )
+
+            latest, ignored = phone.load_progress(progress)
+
+        self.assertEqual(set(latest), {"1000000000001", "1000000000002"})
+        self.assertEqual(ignored, 0)
+
     def test_resume_rejects_progress_bound_to_a_different_official_host(self) -> None:
         targets = [{
             "source_id": "alpha",
