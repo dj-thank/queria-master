@@ -23,6 +23,7 @@ REQUIRED_SCOPE_HEADERS = {
     "dataset_generation",
     "jsic_major_codes",
     "jsic_middle_codes",
+    "runtime_binding_status",
 }
 ALLOWED_MIDDLE_CODES = {"", "37", "38", "39", "40", "41"}
 
@@ -42,7 +43,14 @@ def make_target_csv(source: Path) -> Path:
         generation = (row.get("dataset_generation") or "").strip()
         major = (row.get("jsic_major_codes") or "").strip()
         middle = (row.get("jsic_middle_codes") or "").strip()
-        if scope_label != "G37-G41" or not generation or major != "G" or middle not in ALLOWED_MIDDLE_CODES:
+        binding_status = (row.get("runtime_binding_status") or "").strip()
+        if (
+            scope_label != "G37-G41"
+            or not generation
+            or major != "G"
+            or middle not in ALLOWED_MIDDLE_CODES
+            or binding_status != "matched"
+        ):
             raise ValueError(f"G scope binding is invalid at row {index}")
         generations.add(generation)
     if len(generations) != 1:
@@ -54,7 +62,7 @@ def make_target_csv(source: Path) -> Path:
         writer = csv.DictWriter(handle, fieldnames=[
             "corporate_number", "company_name", "prefecture_name", "city_name",
             "scope_label", "dataset_generation", "jsic_major_codes", "jsic_middle_codes",
-            "employee_number", "capital_stock", "company_url",
+            "runtime_binding_status", "employee_number", "capital_stock", "company_url",
         ])
         writer.writeheader()
         for row in rows:
@@ -76,6 +84,7 @@ def make_target_csv(source: Path) -> Path:
                     "dataset_generation": row["dataset_generation"],
                     "jsic_major_codes": row["jsic_major_codes"],
                     "jsic_middle_codes": row["jsic_middle_codes"],
+                    "runtime_binding_status": row["runtime_binding_status"],
                     "employee_number": row.get("employee_number") or "",
                     "capital_stock": row.get("capital_stock") or "",
                     "company_url": website,

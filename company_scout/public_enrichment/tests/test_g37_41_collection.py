@@ -23,16 +23,17 @@ class G3741CollectionTests(unittest.TestCase):
                     fieldnames=[
                         "entity_key", "corporate_number", "company_name", "prefecture_name", "city_name",
                         "employee_number", "capital_stock", "scope_label", "dataset_generation",
-                        "jsic_major_codes", "jsic_middle_codes", "website", "state", "last_completed_at", "last_error",
+                        "jsic_major_codes", "jsic_middle_codes", "runtime_binding_status",
+                        "website", "state", "last_completed_at", "last_error",
                     ],
                 )
                 writer.writeheader()
                 writer.writerows(
                     [
-                        {"entity_key": "1000000000001", "corporate_number": "1000000000001", "company_name": "優先株式会社", "prefecture_name": "東京都", "city_name": "千代田区", "employee_number": "120", "capital_stock": "50000000", "scope_label": "G37-G41", "dataset_generation": "g-test", "jsic_major_codes": "G", "jsic_middle_codes": "39", "website": "https://pending.example/", "state": "pending_official_site"},
-                        {"entity_key": "1000000000002", "corporate_number": "1000000000002", "scope_label": "G37-G41", "dataset_generation": "g-test", "jsic_major_codes": "G", "jsic_middle_codes": "40", "website": "https://known.example/", "state": "fuma_phone"},
-                        {"entity_key": "1000000000003", "corporate_number": "1000000000003", "scope_label": "G37-G41", "dataset_generation": "g-test", "jsic_major_codes": "G", "jsic_middle_codes": "41", "website": "https://establishment.example/", "state": "establishment"},
-                        {"entity_key": "fuma:4", "corporate_number": "", "scope_label": "G37-G41", "dataset_generation": "g-test", "jsic_major_codes": "G", "jsic_middle_codes": "37", "website": "https://unmatched.example/", "state": "pending_official_site"},
+                        {"entity_key": "1000000000001", "corporate_number": "1000000000001", "company_name": "優先株式会社", "prefecture_name": "東京都", "city_name": "千代田区", "employee_number": "120", "capital_stock": "50000000", "scope_label": "G37-G41", "dataset_generation": "g-test", "jsic_major_codes": "G", "jsic_middle_codes": "39", "runtime_binding_status": "matched", "website": "https://pending.example/", "state": "pending_official_site"},
+                        {"entity_key": "1000000000002", "corporate_number": "1000000000002", "scope_label": "G37-G41", "dataset_generation": "g-test", "jsic_major_codes": "G", "jsic_middle_codes": "40", "runtime_binding_status": "matched", "website": "https://known.example/", "state": "fuma_phone"},
+                        {"entity_key": "1000000000003", "corporate_number": "1000000000003", "scope_label": "G37-G41", "dataset_generation": "g-test", "jsic_major_codes": "G", "jsic_middle_codes": "41", "runtime_binding_status": "matched", "website": "https://establishment.example/", "state": "establishment"},
+                        {"entity_key": "fuma:4", "corporate_number": "", "scope_label": "G37-G41", "dataset_generation": "g-test", "jsic_major_codes": "G", "jsic_middle_codes": "37", "runtime_binding_status": "matched", "website": "https://unmatched.example/", "state": "pending_official_site"},
                     ]
                 )
 
@@ -65,7 +66,7 @@ class G3741CollectionTests(unittest.TestCase):
                     fieldnames=[
                         "entity_key", "corporate_number", "company_name", "prefecture_name", "city_name",
                         "employee_number", "capital_stock", "scope_label", "dataset_generation",
-                        "jsic_major_codes", "jsic_middle_codes", "website", "state",
+                        "jsic_major_codes", "jsic_middle_codes", "runtime_binding_status", "website", "state",
                     ],
                 )
                 writer.writeheader()
@@ -76,6 +77,7 @@ class G3741CollectionTests(unittest.TestCase):
                     "dataset_generation": "g-test",
                     "jsic_major_codes": "H",
                     "jsic_middle_codes": "42",
+                    "runtime_binding_status": "matched",
                     "website": "https://wrong-scope.example/",
                     "state": "pending_official_site",
                 })

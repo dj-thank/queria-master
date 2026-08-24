@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "receipt_date": "2026-08-24",
+  "evidence_gate": "LOCAL_PASS",
+  "scope": "JSIC major G, middle divisions 37-41",
+  "privacy": {
+    "company_rows_committed": false,
+    "candidate_rows_committed": false,
+    "progress_rows_committed": false,
+    "publication_authorized": false
+  },
+  "local_snapshot": {
+    "dataset_generation": "g-v0.10.0-fuma-481b264b0cd2",
+    "source_git_ref": "main@ab55bb09aab4af1a5a8b126001420c68c63cd582",
+    "run_ids": [
+      "queria-g37-phone-pilot-100-20260824",
+      "queria-g37-phone-wave-900-20260824",
+      "queria-g37-phone-wave-retry-20260824",
+      "queria-g37-phone-remainder-2930-20260824",
+      "queria-g37-phone-remainder-retry-20260824"
+    ],
+    "pilot_1000": {
+      "target_companies": 1000,
+      "completed_companies": 1000,
+      "progress_lines": 1113,
+      "pages_fetched": 3203,
+      "states": {
+        "blocked_by_policy": 18,
+        "fax_only": 133,
+        "needs_review": 103,
+        "phone_candidate_found": 396,
+        "processed_no_phone": 350
+      },
+      "candidate_rows": 1633,
+      "high_confidence_voice_candidate_rows": 636,
+      "verification_receipt": {
+        "name": "queria-g-first1000-verification.json",
+        "bytes": 3385,
+        "sha256": "921714ca2b5f30cc82f741c4b65eea58ddc81934c36511a3dac5654b03310117"
+      },
+      "candidate_csv": {
+        "name": "queria-g-first1000-phone-candidates.csv",
+        "bytes": 908323,
+        "sha256": "6a0c7d3e10b3c0052b211bddc7df7a61a516141cb636d054cc8b1ec09f29bbe8"
+      }
+    },
+    "known_official_sites": {
+      "target_companies": 3930,
+      "completed_companies": 3930,
+      "progress_lines": 4297,
+      "retry_or_reclassification_records": 367,
+      "pages_fetched": 11620,
+      "states": {
+        "blocked_by_policy": 103,
+        "fax_only": 532,
+        "needs_review": 354,
+        "phone_candidate_found": 1726,
+        "processed_no_phone": 1215
+      },
+      "candidate_rows": 5843,
+      "high_confidence_voice_candidate_rows": 2086,
+      "same_host_evidence": true,
+      "duplicate_company_phone_pairs": 0,
+      "verification_receipt": {
+        "name": "queria-g-known-sites-verification.json",
+        "bytes": 6249,
+        "sha256": "9abc91271c886c701ef5212e67a0cdc246fa2b2ac71b3fa6b9f9e703c36537cd"
+      },
+      "candidate_csv": {
+        "name": "queria-g-known-sites-phone-candidates.csv",
+        "bytes": 3197602,
+        "sha256": "7b07ba11580234a9f2451c715e1a59422646a77bb63b743b7d967f6bb7afac77"
+      }
+    },
+    "top_10000_accounting": {
+      "rows": 10000,
+      "unique_entity_keys": 10000,
+      "current_contact_states": {
+        "blocked_by_policy": 103,
+        "fax_only": 532,
+        "needs_review": 354,
+        "phone_present": 418,
+        "processed_no_phone": 1215,
+        "voice_phone_candidate": 1726,
+        "website_missing": 5652
+      },
+      "ledger": {
+        "name": "queria-g-top10000-contact-ledger.csv",
+        "bytes": 5037160,
+        "sha256": "9faf528495699ed800e769ae74db66e5c9d065058cf7d2c9c22571ed69c4b802"
+      },
+      "summary": {
+        "name": "queria-g-top10000-contact-ledger-summary.json",
+        "bytes": 2454,
+        "sha256": "2092ae80cf17d17e1c9a91cfa685a4032a37528962ce0b865cfa702cfd4ccdf6"
+      },
+      "website_discovery_queue": {
+        "rows": 5860,
+        "state": "candidate_search_not_run",
+        "establishment_candidates_needing_review": 173,
+        "name": "queria-g-top10000-website-discovery-queue.csv",
+        "bytes": 1558177,
+        "sha256": "49a0b43127fe166d48ede52b7984d64f0aaa9bd48c78008ce2bda8070277e61f"
+      }
+    }
+  },
+  "public_release_smoke": {
+    "release_tag": "v0.10.0",
+    "dataset_generation": "g-v0.10.0-fuma-c3c570cd5a5d",
+    "source_rows": 59581,
+    "runtime_matched_rows": 59581,
+    "known_pending_official_sites": 4159,
+    "scope_label": "G37-G41",
+    "runtime_binding_status": "matched"
+  },
+  "limitations": [
+    "The local snapshot and public Release use different dataset generations and their counts must not be combined.",
+    "Private company, candidate, and progress bytes are intentionally absent from Git; hashes identify retained local evidence but do not make the receipt independently reproducible from this repository alone.",
+    "Phone values remain candidates until human review; no false-identification rate has been established.",
+    "Website discovery for missing-site rows has not been run."
+  ]
+}

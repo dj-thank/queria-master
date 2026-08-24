@@ -419,7 +419,8 @@ def discover_for_site(
 def load_targets(db: Path, limit: int) -> list[sqlite3.Row]:
     connection = sqlite3.connect(db)
     connection.row_factory = sqlite3.Row
-    sql = """SELECT c.source_id,c.company_name,m.corporate_number,p.website_url
+    sql = """SELECT c.source_id,c.company_name,m.corporate_number,p.website_url,
+                    c.scope_label,c.dataset_generation,c.runtime_binding_status
              FROM companies c JOIN corporate_matches m ON m.source_id=c.source_id AND m.status='accepted'
              JOIN public_master p ON p.corporate_number=m.corporate_number
              WHERE TRIM(COALESCE(p.website_url,''))<>'' ORDER BY c.source_row"""
@@ -480,6 +481,11 @@ def validate_progress_bindings(targets: list[Any], progress_by_company: dict[str
         record_url = str(record.get("official_site_url") or "")
         if not record_url or official_site_binding(record_url) != official_site_binding(target_url):
             raise ValueError(f"official site mismatch in progress: {corporate_number}")
+        for field in ("scope_label", "dataset_generation", "runtime_binding_status"):
+            target_value = str(_row_value(row, field) or "").strip()
+            progress_value = str(record.get(field) or "").strip()
+            if target_value != progress_value:
+                raise ValueError(f"{field} mismatch in progress: {corporate_number}")
         target_host = official_site_binding(target_url)[0]
         for candidate in record.get("candidates") or []:
             evidence_url = str(candidate.get("url") or "")
@@ -708,6 +714,9 @@ def collect_targets(
             "company_name": _row_value(row, "company_name"),
             "corporate_number": corporate_number,
             "official_site_url": _row_value(row, "website_url"),
+            "scope_label": _row_value(row, "scope_label"),
+            "dataset_generation": _row_value(row, "dataset_generation"),
+            "runtime_binding_status": _row_value(row, "runtime_binding_status"),
             "state": state,
             "pages_fetched": result.get("pages_fetched"),
             "reason": result.get("reason"),

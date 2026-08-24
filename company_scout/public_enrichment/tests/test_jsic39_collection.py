@@ -82,6 +82,26 @@ class Jsic39CollectionTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def manifest_row(self, corporate_number: str) -> dict[str, str]:
+        websites = {
+            "1000000000001": "https://alpha.example/",
+            "1000000000002": "https://beta.example",
+        }
+        return {
+            "法人番号": corporate_number,
+            "公式サイトURL": websites[corporate_number],
+            "スコープ": "",
+            "データ世代": "",
+            "正本照合": "",
+        }
+
+    def write_manifest(self, path: Path, *corporate_numbers: str) -> None:
+        module.write_csv(
+            path,
+            ["法人番号", "公式サイトURL", "スコープ", "データ世代", "正本照合"],
+            [self.manifest_row(number) for number in corporate_numbers],
+        )
+
     def test_prepare_shard_rejects_invalid_ranges(self) -> None:
         with self.assertRaisesRegex(ValueError, "offset"):
             module.prepare_shard(
@@ -133,11 +153,7 @@ class Jsic39CollectionTest(unittest.TestCase):
 
     def test_merge_preserves_multiple_candidates_and_progress_states(self) -> None:
         manifest = self.root / "manifest.csv"
-        module.write_csv(
-            manifest,
-            ["法人番号"],
-            [{"法人番号": "1000000000001"}, {"法人番号": "1000000000002"}],
-        )
+        self.write_manifest(manifest, "1000000000001", "1000000000002")
         phones = self.root / "phones.csv"
         module.write_csv(
             phones,
@@ -205,16 +221,13 @@ class Jsic39CollectionTest(unittest.TestCase):
 
     def test_merge_uses_completed_progress_instead_of_manifest_as_processing_proof(self) -> None:
         manifest = self.root / "manifest.csv"
-        module.write_csv(
-            manifest,
-            ["法人番号"],
-            [{"法人番号": "1000000000001"}, {"法人番号": "1000000000002"}],
-        )
+        self.write_manifest(manifest, "1000000000001", "1000000000002")
         progress = self.root / "progress.jsonl"
         progress.write_text(
             json.dumps({
                 "schema_version": 1,
                 "corporate_number": "1000000000001",
+                "official_site_url": "https://alpha.example/",
                 "state": "phone_candidate_found",
                 "candidates": [{
                     "phone": "0312345678",
@@ -250,12 +263,13 @@ class Jsic39CollectionTest(unittest.TestCase):
 
     def test_merge_reports_fax_only_separately_from_voice_candidates(self) -> None:
         manifest = self.root / "manifest.csv"
-        module.write_csv(manifest, ["法人番号"], [{"法人番号": "1000000000001"}])
+        self.write_manifest(manifest, "1000000000001")
         progress = self.root / "progress.jsonl"
         progress.write_text(
             json.dumps({
                 "schema_version": 1,
                 "corporate_number": "1000000000001",
+                "official_site_url": "https://alpha.example/",
                 "state": "fax_only",
                 "candidates": [{
                     "phone": "0312345678",
@@ -286,7 +300,7 @@ class Jsic39CollectionTest(unittest.TestCase):
 
     def test_merge_fails_closed_when_requested_progress_artifact_is_missing(self) -> None:
         manifest = self.root / "manifest.csv"
-        module.write_csv(manifest, ["法人番号"], [{"法人番号": "1000000000001"}])
+        self.write_manifest(manifest, "1000000000001")
 
         with self.assertRaisesRegex(FileNotFoundError, "progress"):
             module.merge_batches(
@@ -300,13 +314,40 @@ class Jsic39CollectionTest(unittest.TestCase):
 
     def test_merge_requires_progress_unless_legacy_mode_is_explicit(self) -> None:
         manifest = self.root / "manifest.csv"
-        module.write_csv(manifest, ["法人番号"], [{"法人番号": "1000000000001"}])
+        self.write_manifest(manifest, "1000000000001")
 
         with self.assertRaisesRegex(ValueError, "progress.*required"):
             module.merge_batches(
                 all_companies_csv=self.companies,
                 manifests=[str(manifest)],
                 phone_files=[],
+                output=self.root / "output.csv",
+                summary=self.root / "summary.json",
+            )
+
+    def test_merge_rejects_progress_from_another_dataset_generation(self) -> None:
+        manifest = self.root / "manifest.csv"
+        self.write_manifest(manifest, "1000000000001")
+        progress = self.root / "progress.jsonl"
+        progress.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "corporate_number": "1000000000001",
+                "official_site_url": "https://alpha.example/",
+                "dataset_generation": "stale-generation",
+                "state": "no_phone_found",
+                "candidates": [],
+                "completed_at": "2026-08-24T00:00:00Z",
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "dataset_generation mismatch"):
+            module.merge_batches(
+                all_companies_csv=self.companies,
+                manifests=[str(manifest)],
+                phone_files=[],
+                progress_files=[str(progress)],
                 output=self.root / "output.csv",
                 summary=self.root / "summary.json",
             )

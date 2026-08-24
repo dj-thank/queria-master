@@ -53,6 +53,18 @@ def normalize_url(value: Any) -> str:
     return text
 
 
+def url_binding(value: Any) -> tuple[str, str, str]:
+    normalized = normalize_url(value)
+    if not normalized:
+        return "", "", ""
+    parsed = urlparse(normalized)
+    return (
+        (parsed.hostname or "").lower().removeprefix("www."),
+        parsed.path.rstrip("/") or "/",
+        parsed.query,
+    )
+
+
 def read_csv(path: Path) -> list[dict[str, str]]:
     with path.open("r", encoding=CSV_ENCODING, newline="") as handle:
         return list(csv.DictReader(handle))
@@ -112,7 +124,10 @@ def prepare_shard(
                 source_row INTEGER NOT NULL,
                 company_name TEXT NOT NULL,
                 address TEXT,
-                security_code TEXT
+                security_code TEXT,
+                scope_label TEXT,
+                dataset_generation TEXT,
+                runtime_binding_status TEXT
             );
             CREATE TABLE corporate_matches(
                 source_id TEXT PRIMARY KEY REFERENCES companies(source_id) ON DELETE CASCADE,
@@ -133,8 +148,17 @@ def prepare_shard(
             address = clean(row.get("prefecture_name")) + clean(row.get("city_name"))
             website = normalize_url(row.get("company_url"))
             connection.execute(
-                "INSERT INTO companies(source_id,source_row,company_name,address,security_code) VALUES(?,?,?,?,?)",
-                (local_source_id, local_index + 1, company_name, address, ""),
+                "INSERT INTO companies(source_id,source_row,company_name,address,security_code,scope_label,dataset_generation,runtime_binding_status) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    local_source_id,
+                    local_index + 1,
+                    company_name,
+                    address,
+                    "",
+                    clean(row.get("scope_label")),
+                    clean(row.get("dataset_generation")),
+                    clean(row.get("runtime_binding_status")),
+                ),
             )
             connection.execute(
                 "INSERT INTO corporate_matches(source_id,corporate_number,status) VALUES(?,?,?)",
@@ -155,6 +179,7 @@ def prepare_shard(
                     "データ世代": clean(row.get("dataset_generation")),
                     "JSIC大分類": clean(row.get("jsic_major_codes")),
                     "JSIC中分類": clean(row.get("jsic_middle_codes")),
+                    "正本照合": clean(row.get("runtime_binding_status")),
                     "従業員数": clean(row.get("employee_number")),
                     "資本金": clean(row.get("capital_stock")),
                     "公式サイトURL": website,
@@ -176,6 +201,7 @@ def prepare_shard(
         "データ世代",
         "JSIC大分類",
         "JSIC中分類",
+        "正本照合",
         "従業員数",
         "資本金",
         "公式サイトURL",
@@ -264,13 +290,39 @@ def merge_batches(
     all_rows = read_csv(all_companies_csv)
     manifest_paths = _expand_patterns(manifests)
     phone_paths = _expand_patterns(phone_files)
+    if not manifest_paths:
+        raise FileNotFoundError("No manifest artifacts were found")
+
+    all_by_company: dict[str, dict[str, str]] = {}
+    for row in all_rows:
+        corporate_number = clean(row.get("corporate_number"))
+        if not corporate_number:
+            continue
+        if corporate_number in all_by_company:
+            raise ValueError(f"Duplicate corporate number in company universe: {corporate_number}")
+        all_by_company[corporate_number] = row
 
     targeted: set[str] = set()
+    manifest_by_company: dict[str, dict[str, str]] = {}
     for path in manifest_paths:
         for row in read_csv(path):
             corporate_number = clean(row.get("法人番号"))
             if corporate_number:
+                if corporate_number in manifest_by_company:
+                    raise ValueError(f"Duplicate corporate number across manifests: {corporate_number}")
+                company_row = all_by_company.get(corporate_number)
+                if company_row is None:
+                    raise ValueError(f"Manifest company is outside the company universe: {corporate_number}")
+                if url_binding(row.get("公式サイトURL")) != url_binding(company_row.get("company_url")):
+                    raise ValueError(f"Manifest official site mismatch: {corporate_number}")
+                if clean(row.get("スコープ")) != clean(company_row.get("scope_label")):
+                    raise ValueError(f"Manifest scope mismatch: {corporate_number}")
+                if clean(row.get("データ世代")) != clean(company_row.get("dataset_generation")):
+                    raise ValueError(f"Manifest generation mismatch: {corporate_number}")
+                if clean(row.get("正本照合")) != clean(company_row.get("runtime_binding_status")):
+                    raise ValueError(f"Manifest runtime binding mismatch: {corporate_number}")
                 targeted.add(corporate_number)
+                manifest_by_company[corporate_number] = row
 
     requested_progress = list(progress_files or [])
     missing_progress_patterns = [
@@ -283,19 +335,41 @@ def merge_batches(
     progress_by_company, progress_paths = _read_progress_jsonl(requested_progress)
     if not progress_paths and not legacy_manifest_completion:
         raise ValueError("progress artifact is required unless legacy_manifest_completion is explicit")
+    for corporate_number, record in progress_by_company.items():
+        manifest_row = manifest_by_company.get(corporate_number)
+        if manifest_row is None:
+            raise ValueError(f"Progress company is outside the manifests: {corporate_number}")
+        if url_binding(record.get("official_site_url")) != url_binding(manifest_row.get("公式サイトURL")):
+            raise ValueError(f"Progress official site mismatch: {corporate_number}")
+        for progress_field, manifest_field in (
+            ("scope_label", "スコープ"),
+            ("dataset_generation", "データ世代"),
+            ("runtime_binding_status", "正本照合"),
+        ):
+            if clean(record.get(progress_field)) != clean(manifest_row.get(manifest_field)):
+                raise ValueError(f"Progress {progress_field} mismatch: {corporate_number}")
+        target_host = url_binding(manifest_row.get("公式サイトURL"))[0]
+        for candidate in record.get("candidates") or []:
+            if url_binding(candidate.get("url"))[0] != target_host:
+                raise ValueError(f"Progress candidate host mismatch: {corporate_number}")
     processed = set(progress_by_company) if progress_paths else set(targeted)
 
     candidates_by_company: dict[str, dict[str, dict[str, str]]] = {}
-    for path in phone_paths:
-        for row in read_csv(path):
-            corporate_number = clean(row.get("法人番号"))
-            phone_digits = re.sub(r"\D", "", clean(row.get("電話番号")))
-            if not corporate_number or not phone_digits:
-                continue
-            company_candidates = candidates_by_company.setdefault(corporate_number, {})
-            current = company_candidates.get(phone_digits)
-            if current is None or _candidate_key(row) > _candidate_key(current):
-                company_candidates[phone_digits] = row
+    # A modern run treats the bound, append-only progress log as the only
+    # candidate source. The CSV export is a convenience artifact and may lag a
+    # progress fsync after interruption. Legacy imports without progress retain
+    # the previous CSV behavior behind the explicit compatibility flag.
+    if not progress_paths:
+        for path in phone_paths:
+            for row in read_csv(path):
+                corporate_number = clean(row.get("法人番号"))
+                phone_digits = re.sub(r"\D", "", clean(row.get("電話番号")))
+                if not corporate_number or not phone_digits:
+                    continue
+                company_candidates = candidates_by_company.setdefault(corporate_number, {})
+                current = company_candidates.get(phone_digits)
+                if current is None or _candidate_key(row) > _candidate_key(current):
+                    company_candidates[phone_digits] = row
 
     # The append-only progress log is the crash-safe source of truth. Rebuild
     # candidate rows from it so a process interruption between progress commit

@@ -1053,6 +1053,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "dataset_generation": generation,
             "jsic_major_codes": "G",
             "jsic_middle_codes": company["industry_middle_code"] or "",
+            "runtime_binding_status": "matched",
             "website": company["website"],
             "state": company["phone_status"] if company["phone"] else (
                 "pending_official_site" if company["website"] and company["corporate_number"]
@@ -1117,7 +1118,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         writer = csv.DictWriter(handle, fieldnames=[
             "entity_key", "corporate_number", "company_name", "prefecture_name", "city_name",
             "employee_number", "capital_stock", "scope_label", "dataset_generation",
-            "jsic_major_codes", "jsic_middle_codes", "website", "state", "last_completed_at", "last_error",
+            "jsic_major_codes", "jsic_middle_codes", "runtime_binding_status",
+            "website", "state", "last_completed_at", "last_error",
         ])
         writer.writeheader()
         writer.writerows(phone_state)
