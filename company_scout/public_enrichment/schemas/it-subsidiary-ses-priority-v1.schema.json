@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://queria.local/schemas/it-subsidiary-ses-priority-v1.schema.json",
+  "title": "Queria IT subsidiary and SES sales-priority record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "entity",
+    "official_site",
+    "parent_company",
+    "business_signals",
+    "contact_evidence",
+    "collection_state",
+    "fit_scores",
+    "priority_tier",
+    "negative_controls",
+    "unknowns",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entity_key", "corporate_number", "company_name", "prefecture", "city", "employees", "capital", "industry_code"],
+      "properties": {
+        "entity_key": {"type": "string", "minLength": 1},
+        "corporate_number": {"type": ["string", "null"], "pattern": "^[0-9]{13}$"},
+        "company_name": {"type": "string", "minLength": 1},
+        "prefecture": {"type": ["string", "null"]},
+        "city": {"type": ["string", "null"]},
+        "employees": {"type": ["integer", "null"], "minimum": 0},
+        "capital": {"type": ["integer", "null"], "minimum": 0},
+        "industry_code": {"type": ["string", "null"]}
+      }
+    },
+    "official_site": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "canonicality", "same_host_verified", "evidence"],
+      "properties": {
+        "url": {"type": ["string", "null"], "format": "uri"},
+        "canonicality": {"enum": ["observed", "candidate", "missing", "blocked", "unknown"]},
+        "same_host_verified": {"type": "boolean"},
+        "evidence": {"type": "array", "maxItems": 50, "items": {"$ref": "#/$defs/evidence"}}
+      }
+    },
+    "parent_company": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status", "evidence"],
+      "properties": {
+        "name": {"type": ["string", "null"]},
+        "status": {"enum": ["observed", "candidate", "inference", "unknown"]},
+        "evidence": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/evidence"}}
+      }
+    },
+    "business_signals": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["signal", "fact_or_inference", "strength", "evidence_url", "excerpt"],
+        "properties": {
+          "signal": {"enum": ["it_subsidiary", "user_system_it", "parent_group", "ses", "onsite_development", "si", "contract_development", "it_operations", "recruitment", "other"]},
+          "fact_or_inference": {"enum": ["observed", "inference"]},
+          "strength": {"type": "integer", "minimum": 0, "maximum": 100},
+          "evidence_url": {"type": "string", "format": "uri"},
+          "excerpt": {"type": "string", "minLength": 1, "maxLength": 240}
+        }
+      }
+    },
+    "contact_evidence": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["channel", "value", "type", "evidence_url", "review_status"],
+        "properties": {
+          "channel": {"enum": ["phone", "form"]},
+          "value": {"type": ["string", "null"]},
+          "type": {"enum": ["representative", "head_office", "inquiry", "recruiting", "support", "ir", "privacy", "branch", "fax", "unclassified", "form"]},
+          "evidence_url": {"type": "string", "format": "uri"},
+          "review_status": {"enum": ["candidate_needs_review", "imported_unverified", "excluded"]}
+        }
+      }
+    },
+    "collection_state": {"type": "string", "minLength": 1},
+    "fit_scores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["formula_version", "it_subsidiary_score", "ses_sales_score", "contactability_score", "priority_score", "tier", "reasons"],
+      "properties": {
+        "formula_version": {"const": "it-subsidiary-ses-v1"},
+        "it_subsidiary_score": {"type": "integer", "minimum": 0, "maximum": 65},
+        "ses_sales_score": {"type": "integer", "minimum": 0, "maximum": 65},
+        "contactability_score": {"type": "integer", "minimum": 0, "maximum": 30},
+        "priority_score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "tier": {"enum": ["A", "B", "C", "blocked", "unknown"]},
+        "reasons": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "priority_tier": {"enum": ["A", "B", "C", "blocked", "unknown"]},
+    "negative_controls": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "unknowns": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dataset_generation", "generated_at", "profile_schema_version", "progress_schema_version", "algorithm_version", "promotion_authorized"],
+      "properties": {
+        "dataset_generation": {"type": ["string", "null"]},
+        "generated_at": {"type": "string", "format": "date-time"},
+        "profile_schema_version": {"type": "integer", "minimum": 1},
+        "progress_schema_version": {"type": "integer", "minimum": 1},
+        "algorithm_version": {"const": "it-subsidiary-ses-v1"},
+        "promotion_authorized": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signal", "status", "evidence_url", "excerpt", "excerpt_sha256", "observed_at"],
+      "properties": {
+        "signal": {"type": "string", "minLength": 1},
+        "status": {"enum": ["observed_text", "inference"]},
+        "evidence_url": {"type": "string", "format": "uri"},
+        "excerpt": {"type": "string", "minLength": 1, "maxLength": 240},
+        "excerpt_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "observed_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

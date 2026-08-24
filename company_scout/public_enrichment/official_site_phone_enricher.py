@@ -22,6 +22,13 @@ from urllib.robotparser import RobotFileParser
 
 import requests
 
+from business_profile import (
+    empty_business_profile,
+    extract_business_profile_evidence,
+    merge_business_profiles,
+    validate_profile_evidence_host,
+)
+
 USER_AGENT = "Public-Company-Enricher/1.1 (+official contact discovery; low rate)"
 MAX_HTML_BYTES = 2_000_000
 MAX_ROBOTS_BYTES = 512_000
@@ -348,12 +355,22 @@ def candidate_sort_key(candidate: dict[str, Any]) -> tuple[float, int, int, int,
     )
 
 
-def extract_candidates(url: str, content: str) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
+def parse_page(content: str) -> PageParser:
     parser = PageParser()
     try:
         parser.feed(content)
     except Exception:
         pass
+    return parser
+
+
+def extract_candidates(
+    url: str,
+    content: str,
+    *,
+    parser: PageParser | None = None,
+) -> tuple[list[dict[str, Any]], list[tuple[str, str]]]:
+    parser = parser or parse_page(content)
     text = " | ".join(parser.text_parts)
     candidates_by_phone: dict[str, dict[str, Any]] = {}
 
@@ -402,11 +419,18 @@ def _crawl_site(
     parsed = urlparse(website)
     host = (parsed.hostname or "").lower()
     if not host or not is_public_http_url(website):
-        return {"candidates": [], "pages_fetched": 0, "fetch_failures": 0, "policy_skips": 1}
+        return {
+            "candidates": [],
+            "business_profile": empty_business_profile(),
+            "pages_fetched": 0,
+            "fetch_failures": 0,
+            "policy_skips": 1,
+        }
     robot = robot or build_robot(session, website, timeout)
     queue = [website]
     visited: set[str] = set()
     candidates_by_phone: dict[str, dict[str, Any]] = {}
+    page_profiles: list[dict[str, Any]] = []
     pages_fetched = 0
     fetch_failures = 0
     policy_skips = 0
@@ -434,7 +458,15 @@ def _crawl_site(
             fetch_failures += 1
             continue
         pages_fetched += 1
-        candidates, links = extract_candidates(final_url, text)
+        page_parser = parse_page(text)
+        candidates, links = extract_candidates(final_url, text, parser=page_parser)
+        page_profiles.append(
+            extract_business_profile_evidence(
+                final_url,
+                " | ".join(page_parser.text_parts),
+                page_parser.links,
+            )
+        )
         for candidate in candidates:
             phone = str(candidate["phone"])
             current = candidates_by_phone.get(phone)
@@ -455,6 +487,7 @@ def _crawl_site(
         time.sleep(max(0.0, sleep_s))
     return {
         "candidates": sorted(candidates_by_phone.values(), key=candidate_sort_key, reverse=True),
+        "business_profile": merge_business_profiles(page_profiles),
         "pages_fetched": pages_fetched,
         "fetch_failures": fetch_failures,
         "policy_skips": policy_skips,
@@ -561,6 +594,9 @@ def validate_progress_bindings(targets: list[Any], progress_by_company: dict[str
                 raise ValueError(f"candidate evidence host mismatch in progress: {corporate_number}")
             if not normalize_phone(str(candidate.get("phone") or "")):
                 raise ValueError(f"invalid phone candidate in progress: {corporate_number}")
+        profile = record.get("business_profile")
+        if profile is not None and not validate_profile_evidence_host(profile, target_url):
+            raise ValueError(f"business profile evidence host mismatch in progress: {corporate_number}")
 
 
 def load_progress(path: Path) -> tuple[dict[str, dict[str, Any]], int]:
@@ -668,6 +704,7 @@ def discover_site_result(
             "pages_fetched": 0,
             "reason": "unsafe_or_unresolvable_url",
             "candidates": [],
+            "business_profile": empty_business_profile(),
         }
     robot, policy_reason = load_robot_policy(session, website, timeout)
     if policy_reason:
@@ -676,6 +713,7 @@ def discover_site_result(
             "pages_fetched": 0,
             "reason": policy_reason,
             "candidates": [],
+            "business_profile": empty_business_profile(),
         }
     if not robot.can_fetch(USER_AGENT, website):
         return {
@@ -683,6 +721,7 @@ def discover_site_result(
             "pages_fetched": 0,
             "reason": "robots_disallow",
             "candidates": [],
+            "business_profile": empty_business_profile(),
         }
     crawl = _crawl_site(
         session,
@@ -715,6 +754,7 @@ def discover_site_result(
         "pages_fetched": pages_fetched,
         "reason": reason,
         "candidates": candidates,
+        "business_profile": crawl["business_profile"],
     }
 
 
@@ -730,6 +770,7 @@ def collect_targets(
     sleep_s: float,
     resume: bool,
     retry_states: set[str] | None = None,
+    retry_missing_profile: bool = False,
     discoverer: Any = discover_site_result,
 ) -> dict[str, Any]:
     retry_states = set(retry_states or ())
@@ -747,17 +788,25 @@ def collect_targets(
         if str(_row_value(row, "corporate_number") or "").strip()
     }
     validate_progress_bindings(targets, progress_by_company)
+    def should_retry(record: dict[str, Any]) -> bool:
+        if str(record.get("state") or "") in retry_states:
+            return True
+        return retry_missing_profile and (
+            int(record.get("schema_version") or 1) < 2
+            or not isinstance(record.get("business_profile"), dict)
+        )
+
     already_completed = sum(
         1
         for number in target_numbers
-        if number in progress_by_company and progress_by_company[number]["state"] not in retry_states
+        if number in progress_by_company and not should_retry(progress_by_company[number])
     )
     attempted = 0
     retried = 0
     for row in targets:
         corporate_number = str(_row_value(row, "corporate_number") or "").strip()
         existing = progress_by_company.get(corporate_number)
-        if not corporate_number or (resume and existing and existing["state"] not in retry_states):
+        if not corporate_number or (resume and existing and not should_retry(existing)):
             continue
         if existing:
             retried += 1
@@ -777,7 +826,7 @@ def collect_targets(
             reverse=True,
         )[:max_candidates]
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "source_id": _row_value(row, "source_id"),
             "company_name": _row_value(row, "company_name"),
             "corporate_number": corporate_number,
@@ -789,6 +838,7 @@ def collect_targets(
             "pages_fetched": result.get("pages_fetched"),
             "reason": result.get("reason"),
             "candidates": candidates,
+            "business_profile": result.get("business_profile") or empty_business_profile(),
             "completed_at": now_iso(),
         }
         append_progress(progress, record)
@@ -803,6 +853,11 @@ def collect_targets(
             continue
         state = str(record["state"])
         state_counts[state] = state_counts.get(state, 0) + 1
+    profiles_with_evidence = sum(
+        1
+        for number in target_numbers
+        if (progress_by_company.get(number, {}).get("business_profile") or {}).get("facts")
+    )
     return {
         "targets": len(target_numbers),
         "already_completed": already_completed,
@@ -812,6 +867,7 @@ def collect_targets(
         "states": state_counts,
         "companies_with_candidates": state_counts.get("phone_candidate_found", 0),
         "phone_candidates_written": candidates_written,
+        "profiles_with_evidence": profiles_with_evidence,
         "ignored_truncated_tail_lines": ignored_tail_lines,
         "output": str(output),
         "progress": str(progress),
@@ -837,6 +893,11 @@ def main() -> int:
         choices=sorted(TERMINAL_STATES),
         help="指定状態だけを再試行する（複数指定可）",
     )
+    parser.add_argument(
+        "--retry-missing-profile",
+        action="store_true",
+        help="旧schemaまたはprofile未収集の完了行だけを再取得する",
+    )
     parser.add_argument("--trust-env", action="store_true", help="互換用。SSRF防止のため指定時はfail closedする")
     args = parser.parse_args()
     if args.max_candidates < 1:
@@ -860,6 +921,7 @@ def main() -> int:
         sleep_s=args.sleep,
         resume=True,
         retry_states=set(args.retry_state),
+        retry_missing_profile=args.retry_missing_profile,
     )
     if args.summary:
         args.summary.parent.mkdir(parents=True, exist_ok=True)

@@ -75,6 +75,15 @@ jobs:
             --database collection/queria_runtime_g_fuma.duckdb \
             --output collection/phone_targets_g37_41_enriched.csv \
             --require-complete
+      - name: Prioritize IT subsidiaries and SES-friendly targets deterministically
+        run: |
+          set -euo pipefail
+          python company_scout/public_enrichment/ses_priority_json.py prioritize-targets \
+            --input collection/phone_targets_g37_41_enriched.csv \
+            --output collection/phone_targets_g37_41_prioritized.csv \
+            --summary collection/g_ses_priority_seed_summary.json
+          test -s collection/phone_targets_g37_41_prioritized.csv
+          test -s collection/g_ses_priority_seed_summary.json
       - name: Encrypt cross-job target artifact
         env:
           G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
@@ -85,7 +94,8 @@ jobs:
             exit 1
           }
           umask 077
-          tar -C collection -czf - phone_targets_g37_41_enriched.csv |
+          tar -C collection -czf - \
+              phone_targets_g37_41_prioritized.csv g_ses_priority_seed_summary.json |
             openssl enc -aes-256-cbc -pbkdf2 -salt \
               -pass env:G_CONTACT_ARTIFACT_KEY \
               -out collection/g-contact-targets.tar.gz.enc
@@ -129,7 +139,8 @@ jobs:
             -pass env:G_CONTACT_ARTIFACT_KEY \
             -in collection-archive/g-contact-targets.tar.gz.enc |
             tar -C collection -xzf -
-          test -s collection/phone_targets_g37_41_enriched.csv
+          test -s collection/phone_targets_g37_41_prioritized.csv
+          test -s collection/g_ses_priority_seed_summary.json
       - name: Prepare shard, restore matching progress, and crawl
         shell: bash
         working-directory: company_scout/public_enrichment
@@ -154,7 +165,7 @@ jobs:
           WORK="work/shard-${SHARD}"
           mkdir -p "$WORK"
           python jsic_g37_41_collection.py \
-            --targets ../../collection/phone_targets_g37_41_enriched.csv \
+            --targets ../../collection/phone_targets_g37_41_prioritized.csv \
             --database "$WORK/targets.sqlite3" \
             --manifest "$WORK/manifest.csv" \
             --summary "$WORK/prepare_summary.json" \
@@ -199,7 +210,8 @@ jobs:
             --max-pages "$MAX_PAGES" \
             --max-candidates 5 \
             --sleep 0.75 \
-            --timeout 20
+            --timeout 20 \
+            --retry-missing-profile
 
           test -s "$WORK/manifest.csv"
           test -e "$WORK/progress.jsonl"
@@ -225,6 +237,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Install profile export dependencies
+        working-directory: company_scout/public_enrichment
+        run: python -m pip install -r requirements.txt
       - uses: actions/download-artifact@v4
         with:
           name: g-contact-targets
@@ -262,7 +277,7 @@ jobs:
           done
           mkdir -p output
           python export_g_contact_targets.py \
-            --targets ../../collection/phone_targets_g37_41_enriched.csv \
+            --targets ../../collection/phone_targets_g37_41_prioritized.csv \
             --output output/g_contact_targets.csv
           python jsic39_collection.py merge \
             --all-companies output/g_contact_targets.csv \
@@ -272,7 +287,21 @@ jobs:
             --scope-label G37-G41 \
             --output output/g_public_contacts.csv \
             --summary output/g_collection_summary.json
-          tar -C output -czf - g_contact_targets.csv g_public_contacts.csv g_collection_summary.json |
+          python ses_priority_json.py export \
+            --targets ../../collection/phone_targets_g37_41_prioritized.csv \
+            --progress '../../batches/decrypted/**/progress.jsonl' \
+            --schema schemas/it-subsidiary-ses-priority-v1.schema.json \
+            --jsonl output/g_ses_priority_profiles.jsonl \
+            --csv output/g_ses_priority_profiles.csv \
+            --summary output/g_ses_priority_summary.json
+          cp ../../collection/g_ses_priority_seed_summary.json output/g_ses_priority_seed_summary.json
+          test -s output/g_ses_priority_profiles.jsonl
+          test -s output/g_ses_priority_profiles.csv
+          test -s output/g_ses_priority_summary.json
+          tar -C output -czf - \
+              g_contact_targets.csv g_public_contacts.csv g_collection_summary.json \
+              g_ses_priority_profiles.jsonl g_ses_priority_profiles.csv \
+              g_ses_priority_summary.json g_ses_priority_seed_summary.json |
             openssl enc -aes-256-cbc -pbkdf2 -salt \
               -pass env:G_CONTACT_ARTIFACT_KEY \
               -out output/g-contact-batch.tar.gz.enc
