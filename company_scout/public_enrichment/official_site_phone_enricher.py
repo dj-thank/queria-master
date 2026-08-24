@@ -7,6 +7,7 @@ import argparse
 import csv
 import html
 import ipaddress
+import os
 import socket
 import json
 import re
@@ -103,19 +104,19 @@ def canonical_url(base: str, href: str) -> str:
     return urldefrag(urljoin(base, href))[0]
 
 
-def is_public_http_url(url: str) -> bool:
-    """Reject non-web schemes and destinations that can reach local/private networks."""
+def resolve_public_http_url(url: str) -> tuple[Any, tuple[str, ...]] | None:
+    """Resolve one URL once and return only a wholly public endpoint snapshot."""
     try:
         parsed = urlparse(url)
         if parsed.scheme.lower() not in {"http", "https"}:
-            return False
+            return None
         if parsed.username or parsed.password:
-            return False
+            return None
         host = (parsed.hostname or "").strip(".").lower()
         if not host or host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
-            return False
+            return None
         if parsed.port not in {None, 80, 443}:
-            return False
+            return None
         infos = socket.getaddrinfo(
             host,
             parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
@@ -123,10 +124,73 @@ def is_public_http_url(url: str) -> bool:
         )
         addresses = {info[4][0].split("%", 1)[0] for info in infos}
         if not addresses:
-            return False
-        return all(ipaddress.ip_address(address).is_global for address in addresses)
+            return None
+        parsed_addresses = [ipaddress.ip_address(address) for address in addresses]
+        if not all(address.is_global for address in parsed_addresses):
+            return None
+        ordered = tuple(str(address) for address in sorted(parsed_addresses, key=lambda item: (item.version, int(item))))
+        return parsed, ordered
     except (OSError, ValueError):
-        return False
+        return None
+
+
+def is_public_http_url(url: str) -> bool:
+    """Reject non-web schemes and destinations that can reach local/private networks."""
+    return resolve_public_http_url(url) is not None
+
+
+def original_host_header(url: str) -> str:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").encode("idna").decode("ascii")
+    if ":" in host:
+        host = f"[{host}]"
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    return f"{host}:{parsed.port}" if parsed.port and parsed.port != default_port else host
+
+
+class PublicPinnedHTTPAdapter(requests.adapters.HTTPAdapter):
+    """Connect to the validated IP while retaining the original Host and TLS name."""
+
+    def get_connection_with_tls_context(
+        self,
+        request: requests.PreparedRequest,
+        verify: Any,
+        proxies: dict[str, str] | None = None,
+        cert: Any = None,
+    ) -> Any:
+        if requests.utils.select_proxy(request.url, proxies):
+            raise requests.exceptions.ProxyError("Proxies are disabled for the public-site crawler")
+        endpoint = resolve_public_http_url(request.url)
+        if endpoint is None:
+            raise requests.exceptions.InvalidURL("URL did not resolve exclusively to public addresses")
+        parsed, addresses = endpoint
+        host_params, pool_kwargs = self.build_connection_pool_key_attributes(request, verify, cert)
+        original_host = (parsed.hostname or "").encode("idna").decode("ascii")
+        host_params.update(
+            scheme=parsed.scheme.lower(),
+            host=addresses[0],
+            port=parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+        )
+        if parsed.scheme.lower() == "https":
+            pool_kwargs["server_hostname"] = original_host
+            pool_kwargs["assert_hostname"] = original_host
+        return self.poolmanager.connection_from_host(**host_params, pool_kwargs=pool_kwargs)
+
+    def send(self, request: requests.PreparedRequest, *args: Any, **kwargs: Any) -> requests.Response:
+        if requests.utils.select_proxy(request.url, kwargs.get("proxies")):
+            raise requests.exceptions.ProxyError("Proxies are disabled for the public-site crawler")
+        request.headers["Host"] = original_host_header(request.url)
+        return super().send(request, *args, **kwargs)
+
+
+def build_safe_session() -> requests.Session:
+    session = requests.Session()
+    session.trust_env = False
+    adapter = PublicPinnedHTTPAdapter(max_retries=0)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    session.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.7"})
+    return session
 
 
 def safe_get_text(
@@ -140,6 +204,11 @@ def safe_get_text(
     current = url
     for _ in range(MAX_REDIRECTS + 1):
         if not is_public_http_url(current) or not same_host(current, expected_host):
+            return None
+        try:
+            if not isinstance(session.get_adapter(current), PublicPinnedHTTPAdapter):
+                return None
+        except (AttributeError, requests.RequestException):
             return None
         try:
             response = session.get(current, timeout=timeout, allow_redirects=False, stream=True)
@@ -175,7 +244,11 @@ def safe_get_text(
     return None
 
 
-def build_robot(session: requests.Session, base_url: str, timeout: float) -> RobotFileParser:
+def load_robot_policy(
+    session: requests.Session,
+    base_url: str,
+    timeout: float,
+) -> tuple[RobotFileParser, str | None]:
     parsed = urlparse(base_url)
     host = (parsed.hostname or "").lower()
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
@@ -190,7 +263,7 @@ def build_robot(session: requests.Session, base_url: str, timeout: float) -> Rob
     )
     if result is None:
         parser.parse(["User-agent: *", "Disallow: /"])
-        return parser
+        return parser, "robots_unavailable"
     _url, status, _headers, text = result
     if status == 200:
         parser.parse(text.splitlines())
@@ -198,6 +271,12 @@ def build_robot(session: requests.Session, base_url: str, timeout: float) -> Rob
         parser.parse([])
     else:
         parser.parse(["User-agent: *", "Disallow: /"])
+        return parser, f"robots_http_{status}"
+    return parser, None
+
+
+def build_robot(session: requests.Session, base_url: str, timeout: float) -> RobotFileParser:
+    parser, _reason = load_robot_policy(session, base_url, timeout)
     return parser
 
 
@@ -310,29 +389,34 @@ def extract_candidates(url: str, content: str) -> tuple[list[dict[str, Any]], li
     return list(candidates_by_phone.values()), parser.links
 
 
-def discover_candidates_for_site(
+def _crawl_site(
     session: requests.Session,
     website: str,
     max_pages: int,
     timeout: float,
     sleep_s: float,
-) -> list[dict[str, Any]]:
+    robot: RobotFileParser | None = None,
+) -> dict[str, Any]:
     if not re.match(r"^https?://", website, re.I):
         website = "https://" + website.lstrip("/")
     parsed = urlparse(website)
     host = (parsed.hostname or "").lower()
     if not host or not is_public_http_url(website):
-        return []
-    robot = build_robot(session, website, timeout)
+        return {"candidates": [], "pages_fetched": 0, "fetch_failures": 0, "policy_skips": 1}
+    robot = robot or build_robot(session, website, timeout)
     queue = [website]
     visited: set[str] = set()
     candidates_by_phone: dict[str, dict[str, Any]] = {}
+    pages_fetched = 0
+    fetch_failures = 0
+    policy_skips = 0
     while queue and len(visited) < max_pages:
         url = queue.pop(0)
         if url in visited or not same_host(url, host):
             continue
         visited.add(url)
         if not robot.can_fetch(USER_AGENT, url):
+            policy_skips += 1
             continue
         result = safe_get_text(
             session,
@@ -342,11 +426,14 @@ def discover_candidates_for_site(
             max_bytes=MAX_HTML_BYTES,
         )
         if result is None:
+            fetch_failures += 1
             continue
         final_url, status, headers, text = result
         content_type = headers.get("Content-Type") or headers.get("content-type") or ""
         if status != 200 or "text/html" not in content_type.lower():
+            fetch_failures += 1
             continue
+        pages_fetched += 1
         candidates, links = extract_candidates(final_url, text)
         for candidate in candidates:
             phone = str(candidate["phone"])
@@ -366,7 +453,23 @@ def discover_candidates_for_site(
             if candidate_url not in queue:
                 queue.append(candidate_url)
         time.sleep(max(0.0, sleep_s))
-    return sorted(candidates_by_phone.values(), key=candidate_sort_key, reverse=True)
+    return {
+        "candidates": sorted(candidates_by_phone.values(), key=candidate_sort_key, reverse=True),
+        "pages_fetched": pages_fetched,
+        "fetch_failures": fetch_failures,
+        "policy_skips": policy_skips,
+    }
+
+
+def discover_candidates_for_site(
+    session: requests.Session,
+    website: str,
+    max_pages: int,
+    timeout: float,
+    sleep_s: float,
+    robot: RobotFileParser | None = None,
+) -> list[dict[str, Any]]:
+    return list(_crawl_site(session, website, max_pages, timeout, sleep_s, robot=robot)["candidates"])
 
 
 def discover_for_site(
@@ -384,13 +487,335 @@ def discover_for_site(
 def load_targets(db: Path, limit: int) -> list[sqlite3.Row]:
     connection = sqlite3.connect(db)
     connection.row_factory = sqlite3.Row
-    sql = """SELECT c.source_id,c.company_name,m.corporate_number,p.website_url
+    sql = """SELECT c.source_id,c.company_name,m.corporate_number,p.website_url,
+                    c.scope_label,c.dataset_generation,c.runtime_binding_status
              FROM companies c JOIN corporate_matches m ON m.source_id=c.source_id AND m.status='accepted'
              JOIN public_master p ON p.corporate_number=m.corporate_number
              WHERE TRIM(COALESCE(p.website_url,''))<>'' ORDER BY c.source_row"""
     rows = connection.execute(sql).fetchall()
     connection.close()
     return rows[:limit] if limit > 0 else rows
+
+
+OUTPUT_FIELDS = [
+    "SOURCE_ID",
+    "企業名",
+    "法人番号",
+    "公式サイトURL",
+    "候補順位",
+    "電話番号",
+    "電話種別候補",
+    "根拠URL",
+    "根拠テキスト",
+    "抽出方法",
+    "信頼度",
+    "取得日時",
+]
+TERMINAL_STATES = {
+    "phone_candidate_found",
+    "fax_only",
+    "processed_no_phone",
+    "blocked_by_policy",
+    "needs_review",
+}
+
+
+def _row_value(row: Any, key: str) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
+def official_site_binding(value: Any) -> tuple[str, str, str]:
+    url = str(value or "").strip()
+    if not re.match(r"^https?://", url, re.I):
+        url = "https://" + url.lstrip("/")
+    parsed = urlparse(url)
+    return (
+        (parsed.hostname or "").lower().removeprefix("www."),
+        parsed.path.rstrip("/") or "/",
+        parsed.query,
+    )
+
+
+def validate_progress_bindings(targets: list[Any], progress_by_company: dict[str, dict[str, Any]]) -> None:
+    for row in targets:
+        corporate_number = str(_row_value(row, "corporate_number") or "").strip()
+        record = progress_by_company.get(corporate_number)
+        if record is None:
+            continue
+        target_url = str(_row_value(row, "website_url") or "")
+        record_url = str(record.get("official_site_url") or "")
+        if not record_url or official_site_binding(record_url) != official_site_binding(target_url):
+            raise ValueError(f"official site mismatch in progress: {corporate_number}")
+        for field in ("scope_label", "dataset_generation", "runtime_binding_status"):
+            target_value = str(_row_value(row, field) or "").strip()
+            progress_value = str(record.get(field) or "").strip()
+            if target_value != progress_value:
+                raise ValueError(f"{field} mismatch in progress: {corporate_number}")
+        target_host = official_site_binding(target_url)[0]
+        for candidate in record.get("candidates") or []:
+            evidence_url = str(candidate.get("url") or "")
+            if not evidence_url or official_site_binding(evidence_url)[0] != target_host:
+                raise ValueError(f"candidate evidence host mismatch in progress: {corporate_number}")
+            if not normalize_phone(str(candidate.get("phone") or "")):
+                raise ValueError(f"invalid phone candidate in progress: {corporate_number}")
+
+
+def load_progress(path: Path) -> tuple[dict[str, dict[str, Any]], int]:
+    """Load the latest record per company, tolerating one truncated tail line."""
+    if not path.is_file():
+        return {}, 0
+    lines = path.read_text(encoding="utf-8").splitlines()
+    latest: dict[str, dict[str, Any]] = {}
+    ignored_tail_lines = 0
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            if index == len(lines) - 1:
+                ignored_tail_lines += 1
+                continue
+            raise ValueError(f"Invalid progress JSONL at {path}:{index + 1}")
+        corporate_number = str(record.get("corporate_number") or "").strip()
+        state = str(record.get("state") or "").strip()
+        if not corporate_number or state not in TERMINAL_STATES:
+            raise ValueError(f"Invalid progress record at {path}:{index + 1}")
+        latest[corporate_number] = record
+    return latest, ignored_tail_lines
+
+
+def append_progress(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    with path.open("ab+") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell():
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b"\n":
+                handle.seek(0, os.SEEK_END)
+                handle.write(b"\n")
+        handle.seek(0, os.SEEK_END)
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def truncate_invalid_progress_tail(path: Path) -> None:
+    data = path.read_bytes()
+    last_newline = data.rfind(b"\n")
+    valid = data[: last_newline + 1] if last_newline >= 0 else b""
+    with path.open("r+b") as handle:
+        handle.seek(0)
+        handle.write(valid)
+        handle.truncate()
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def write_candidate_output(
+    output: Path,
+    targets: list[Any],
+    progress_by_company: dict[str, dict[str, Any]],
+) -> int:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with output.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS)
+        writer.writeheader()
+        for row in targets:
+            corporate_number = str(_row_value(row, "corporate_number") or "").strip()
+            record = progress_by_company.get(corporate_number) or {}
+            candidates = list(record.get("candidates") or [])
+            for rank, candidate in enumerate(candidates, start=1):
+                writer.writerow(
+                    {
+                        "SOURCE_ID": _row_value(row, "source_id"),
+                        "企業名": _row_value(row, "company_name"),
+                        "法人番号": corporate_number,
+                        "公式サイトURL": _row_value(row, "website_url"),
+                        "候補順位": rank,
+                        "電話番号": candidate.get("phone"),
+                        "電話種別候補": candidate.get("candidate_type"),
+                        "根拠URL": candidate.get("url"),
+                        "根拠テキスト": candidate.get("context"),
+                        "抽出方法": candidate.get("source"),
+                        "信頼度": f"{float(candidate.get('score') or 0):.2f}",
+                        "取得日時": record.get("completed_at"),
+                    }
+                )
+                written += 1
+    return written
+
+
+def discover_site_result(
+    session: requests.Session,
+    website: str,
+    max_pages: int,
+    timeout: float,
+    sleep_s: float,
+) -> dict[str, Any]:
+    if not re.match(r"^https?://", website, re.I):
+        website = "https://" + website.lstrip("/")
+    parsed = urlparse(website)
+    host = (parsed.hostname or "").lower()
+    if not host or not is_public_http_url(website):
+        return {
+            "state": "blocked_by_policy",
+            "pages_fetched": 0,
+            "reason": "unsafe_or_unresolvable_url",
+            "candidates": [],
+        }
+    robot, policy_reason = load_robot_policy(session, website, timeout)
+    if policy_reason:
+        return {
+            "state": "needs_review",
+            "pages_fetched": 0,
+            "reason": policy_reason,
+            "candidates": [],
+        }
+    if not robot.can_fetch(USER_AGENT, website):
+        return {
+            "state": "blocked_by_policy",
+            "pages_fetched": 0,
+            "reason": "robots_disallow",
+            "candidates": [],
+        }
+    crawl = _crawl_site(
+        session,
+        website,
+        max_pages,
+        timeout,
+        sleep_s,
+        robot=robot,
+    )
+    candidates = list(crawl["candidates"])
+    voice_candidates = [candidate for candidate in candidates if candidate.get("candidate_type") != "FAX"]
+    pages_fetched = int(crawl["pages_fetched"])
+    if voice_candidates:
+        state = "phone_candidate_found"
+        reason = None
+    elif candidates:
+        state = "fax_only"
+        reason = "fax_only"
+    elif pages_fetched:
+        state = "processed_no_phone"
+        reason = None
+    elif int(crawl["policy_skips"]):
+        state = "blocked_by_policy"
+        reason = "robots_disallow"
+    else:
+        state = "needs_review"
+        reason = "fetch_failed"
+    return {
+        "state": state,
+        "pages_fetched": pages_fetched,
+        "reason": reason,
+        "candidates": candidates,
+    }
+
+
+def collect_targets(
+    targets: list[Any],
+    *,
+    session: Any,
+    output: Path,
+    progress: Path,
+    max_pages: int,
+    max_candidates: int,
+    timeout: float,
+    sleep_s: float,
+    resume: bool,
+    retry_states: set[str] | None = None,
+    discoverer: Any = discover_site_result,
+) -> dict[str, Any]:
+    retry_states = set(retry_states or ())
+    unsupported_retry_states = retry_states.difference(TERMINAL_STATES)
+    if unsupported_retry_states:
+        raise ValueError(f"Unsupported retry states: {sorted(unsupported_retry_states)}")
+    progress.parent.mkdir(parents=True, exist_ok=True)
+    progress.touch(exist_ok=True)
+    progress_by_company, ignored_tail_lines = load_progress(progress) if resume else ({}, 0)
+    if ignored_tail_lines:
+        truncate_invalid_progress_tail(progress)
+    target_numbers = {
+        str(_row_value(row, "corporate_number") or "").strip()
+        for row in targets
+        if str(_row_value(row, "corporate_number") or "").strip()
+    }
+    validate_progress_bindings(targets, progress_by_company)
+    already_completed = sum(
+        1
+        for number in target_numbers
+        if number in progress_by_company and progress_by_company[number]["state"] not in retry_states
+    )
+    attempted = 0
+    retried = 0
+    for row in targets:
+        corporate_number = str(_row_value(row, "corporate_number") or "").strip()
+        existing = progress_by_company.get(corporate_number)
+        if not corporate_number or (resume and existing and existing["state"] not in retry_states):
+            continue
+        if existing:
+            retried += 1
+        result = discoverer(
+            session,
+            str(_row_value(row, "website_url") or ""),
+            max_pages,
+            timeout,
+            sleep_s,
+        )
+        state = str(result.get("state") or "").strip()
+        if state not in TERMINAL_STATES:
+            raise ValueError(f"Unsupported collection state: {state}")
+        candidates = sorted(
+            list(result.get("candidates") or []),
+            key=candidate_sort_key,
+            reverse=True,
+        )[:max_candidates]
+        record = {
+            "schema_version": 1,
+            "source_id": _row_value(row, "source_id"),
+            "company_name": _row_value(row, "company_name"),
+            "corporate_number": corporate_number,
+            "official_site_url": _row_value(row, "website_url"),
+            "scope_label": _row_value(row, "scope_label"),
+            "dataset_generation": _row_value(row, "dataset_generation"),
+            "runtime_binding_status": _row_value(row, "runtime_binding_status"),
+            "state": state,
+            "pages_fetched": result.get("pages_fetched"),
+            "reason": result.get("reason"),
+            "candidates": candidates,
+            "completed_at": now_iso(),
+        }
+        append_progress(progress, record)
+        progress_by_company[corporate_number] = record
+        attempted += 1
+
+    candidates_written = write_candidate_output(output, targets, progress_by_company)
+    state_counts: dict[str, int] = {}
+    for corporate_number in target_numbers:
+        record = progress_by_company.get(corporate_number)
+        if not record:
+            continue
+        state = str(record["state"])
+        state_counts[state] = state_counts.get(state, 0) + 1
+    return {
+        "targets": len(target_numbers),
+        "already_completed": already_completed,
+        "attempted_this_run": attempted,
+        "retried_this_run": retried,
+        "completed_total": sum(state_counts.values()),
+        "states": state_counts,
+        "companies_with_candidates": state_counts.get("phone_candidate_found", 0),
+        "phone_candidates_written": candidates_written,
+        "ignored_truncated_tail_lines": ignored_tail_lines,
+        "output": str(output),
+        "progress": str(progress),
+    }
 
 
 def main() -> int:
@@ -402,75 +827,44 @@ def main() -> int:
     parser.add_argument("--sleep", type=float, default=1.0)
     parser.add_argument("--timeout", type=float, default=20)
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--trust-env", action="store_true", help="requestsのプロキシ環境変数を利用する")
+    parser.add_argument("--progress", type=Path, help="再開用のappend-only JSONL")
+    parser.add_argument("--summary", type=Path, help="今回と累積の件数JSON")
+    parser.add_argument("--restart", action="store_true", help="指定progressを破棄して最初から処理する")
+    parser.add_argument(
+        "--retry-state",
+        action="append",
+        default=[],
+        choices=sorted(TERMINAL_STATES),
+        help="指定状態だけを再試行する（複数指定可）",
+    )
+    parser.add_argument("--trust-env", action="store_true", help="互換用。SSRF防止のため指定時はfail closedする")
     args = parser.parse_args()
     if args.max_candidates < 1:
         parser.error("--max-candidates は1以上で指定してください")
 
     targets = load_targets(args.db, args.limit)
-    session = requests.Session()
-    session.trust_env = args.trust_env
-    session.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "ja,en;q=0.7"})
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    fields = [
-        "SOURCE_ID",
-        "企業名",
-        "法人番号",
-        "公式サイトURL",
-        "候補順位",
-        "電話番号",
-        "電話種別候補",
-        "根拠URL",
-        "根拠テキスト",
-        "抽出方法",
-        "信頼度",
-        "取得日時",
-    ]
-    companies_found = 0
-    candidates_written = 0
-    with args.output.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        for row in targets:
-            candidates = discover_candidates_for_site(
-                session,
-                row["website_url"],
-                args.max_pages,
-                args.timeout,
-                args.sleep,
-            )
-            if candidates:
-                companies_found += 1
-            for rank, candidate in enumerate(candidates[: args.max_candidates], start=1):
-                writer.writerow(
-                    {
-                        "SOURCE_ID": row["source_id"],
-                        "企業名": row["company_name"],
-                        "法人番号": row["corporate_number"],
-                        "公式サイトURL": row["website_url"],
-                        "候補順位": rank,
-                        "電話番号": candidate["phone"],
-                        "電話種別候補": candidate["candidate_type"],
-                        "根拠URL": candidate["url"],
-                        "根拠テキスト": candidate["context"],
-                        "抽出方法": candidate["source"],
-                        "信頼度": f"{candidate['score']:.2f}",
-                        "取得日時": now_iso(),
-                    }
-                )
-                candidates_written += 1
-    print(
-        json.dumps(
-            {
-                "targets": len(targets),
-                "companies_with_candidates": companies_found,
-                "phone_candidates_written": candidates_written,
-                "output": str(args.output),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+    if args.trust_env:
+        parser.error("--trust-env はSSRF防止の接続先IP固定と両立しないため使用できません")
+    session = build_safe_session()
+    progress = args.progress or args.output.with_suffix(".progress.jsonl")
+    if args.restart and progress.exists():
+        progress.unlink()
+    result = collect_targets(
+        targets,
+        session=session,
+        output=args.output,
+        progress=progress,
+        max_pages=args.max_pages,
+        max_candidates=args.max_candidates,
+        timeout=args.timeout,
+        sleep_s=args.sleep,
+        resume=True,
+        retry_states=set(args.retry_state),
     )
+    if args.summary:
+        args.summary.parent.mkdir(parents=True, exist_ok=True)
+        args.summary.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 

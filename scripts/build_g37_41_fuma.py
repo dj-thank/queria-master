@@ -39,6 +39,18 @@ ESTAT_BASE = "https://www.e-stat.go.jp/term/download"
 ESTAT_REVISION = "04"
 ESTAT_URL = "https://www.e-stat.go.jp/classifications/terms/10/04/G"
 MHLW_SOURCE_URL = "https://www.mhlw.go.jp/stf/seisakunitsuite/bunya/0000177182.html"
+REQUIRED_FUMA_HEADERS = {
+    "企業名",
+    "FUMA_ID",
+    "本店所在地",
+    "法人番号",
+    "daibunruiCode",
+    "chubunruiCode",
+    "syoubunruiCode",
+    "jsicDetailedClass",
+    "電話番号",
+    "公式サイトURL",
+}
 
 
 def text(value: Any) -> str | None:
@@ -545,8 +557,12 @@ def load_fuma(path: Path) -> tuple[list[str], list[dict[str, Any]], dict[str, in
     worksheet = workbook[workbook.sheetnames[1]]
     iterator = worksheet.iter_rows(values_only=True)
     headers = [text(value) or f"column_{index:02d}" for index, value in enumerate(next(iterator))]
-    if len(headers) != 54:
-        raise ValueError(f"FUMA Excelの列数が54ではありません: {len(headers)}")
+    missing_headers = sorted(REQUIRED_FUMA_HEADERS.difference(headers))
+    if missing_headers:
+        raise ValueError(f"FUMA Excelの必須列がありません: {', '.join(missing_headers)}")
+    duplicate_headers = sorted({header for header in headers if headers.count(header) > 1})
+    if duplicate_headers:
+        raise ValueError(f"FUMA Excelの列名が重複しています: {', '.join(duplicate_headers)}")
     records: list[dict[str, Any]] = []
     for row_number, row in enumerate(iterator, start=2):
         values = list(row) + [None] * max(0, len(headers) - len(row))
@@ -1023,10 +1039,21 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     public_contact_stats.update(
         apply_public_establishment_contacts(companies, public_contacts, phone_rows, website_rows)
     )
+    generation = f"g-v{PACKAGE_VERSION}-fuma-{sha256(xlsx)[:12]}"
     phone_state = [
         {
             "entity_key": company["entity_key"],
             "corporate_number": company["corporate_number"],
+            "company_name": company["name"],
+            "prefecture_name": company["prefecture"],
+            "city_name": company["city"],
+            "employee_number": company["employees"],
+            "capital_stock": company["capital"],
+            "scope_label": "G37-G41",
+            "dataset_generation": generation,
+            "jsic_major_codes": "G",
+            "jsic_middle_codes": company["industry_middle_code"] or "",
+            "runtime_binding_status": "matched",
             "website": company["website"],
             "state": company["phone_status"] if company["phone"] else (
                 "pending_official_site" if company["website"] and company["corporate_number"]
@@ -1038,8 +1065,6 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         }
         for company in companies
     ]
-
-    generation = f"g-v{PACKAGE_VERSION}-fuma-{sha256(xlsx)[:12]}"
     build_dir = out / "_build"
     build_dir.mkdir(parents=True, exist_ok=True)
     canonical_path = build_dir / "queria_master_g_fuma.duckdb"
@@ -1090,7 +1115,12 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     target_metadata.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     target_targets = data_dir / "phone_targets_g37_41.csv"
     with target_targets.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["entity_key", "corporate_number", "website", "state", "last_completed_at", "last_error"])
+        writer = csv.DictWriter(handle, fieldnames=[
+            "entity_key", "corporate_number", "company_name", "prefecture_name", "city_name",
+            "employee_number", "capital_stock", "scope_label", "dataset_generation",
+            "jsic_major_codes", "jsic_middle_codes", "runtime_binding_status",
+            "website", "state", "last_completed_at", "last_error",
+        ])
         writer.writeheader()
         writer.writerows(phone_state)
 
@@ -1102,7 +1132,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "version": PACKAGE_VERSION,
         "git_ref": GIT_REF,
         "scope": ["G", "37", "38", "39", "40", "41", "all small and detail descendants"],
-        "counts": {"fuma_rows": len(fuma_records), "fuma_explicit_corporate_number_rows": explicit_corporate_number_rows, "fuma_recovered_corporate_number_rows": len(recovered_corporate_numbers), "fuma_corporate_number_rows": len(fuma_by_corp), "fuma_only_rows": sum(1 for row in companies if row["source_kind"] == "fuma-only"), "national_g_only_rows": sum(1 for row in companies if row["source_kind"] == "national-g"), "unified_company_rows": len(companies), "industry_rows": len(industries), "phone_candidate_rows": len(phone_rows), "company_phone_rows": sum(1 for row in companies if row["phone"]), "fuma_phone_rows": sum(1 for record in fuma_records if phone_parts(record["by_header"].get("電話番号"))), "website_candidate_rows": len(website_rows), "official_url_rows": sum(1 for row in companies if row["website"]), "public_establishment_contacts": public_contact_stats, "taxonomy_rows": len(taxonomy), "taxonomy_by_level": dict(taxonomy_counts), "source_kind": dict(counts), "corporate_number_matching": corporate_match_stats},
+        "counts": {"fuma_rows": len(fuma_records), "fuma_columns": len(headers), "fuma_explicit_corporate_number_rows": explicit_corporate_number_rows, "fuma_recovered_corporate_number_rows": len(recovered_corporate_numbers), "fuma_corporate_number_rows": len(fuma_by_corp), "fuma_only_rows": sum(1 for row in companies if row["source_kind"] == "fuma-only"), "national_g_only_rows": sum(1 for row in companies if row["source_kind"] == "national-g"), "unified_company_rows": len(companies), "industry_rows": len(industries), "phone_candidate_rows": len(phone_rows), "company_phone_rows": sum(1 for row in companies if row["phone"]), "fuma_phone_rows": sum(1 for record in fuma_records if phone_parts(record["by_header"].get("電話番号"))), "website_candidate_rows": len(website_rows), "official_url_rows": sum(1 for row in companies if row["website"]), "public_establishment_contacts": public_contact_stats, "taxonomy_rows": len(taxonomy), "taxonomy_by_level": dict(taxonomy_counts), "source_kind": dict(counts), "corporate_number_matching": corporate_match_stats},
         "integrity": {"fuma_ids_unique": len(fuma_by_id) == len(fuma_records), "corporate_numbers_are_13_digits": all(not row["corporate_number"] or bool(re.fullmatch(r"\d{13}", row["corporate_number"])) for row in companies), "corporate_numbers_unique": len({row["corporate_number"] for row in companies if row["corporate_number"]}) == sum(1 for row in companies if row["corporate_number"]), "fuma_only_keys_are_prefixed": all(row["source_kind"] != "fuma-only" or row["entity_key"].startswith("fuma:") for row in companies), "no_corporate_number_guessed": True, "recovered_numbers_require_unique_exact_name_and_address": True, "phone_not_declared_representative": all(not row["phone"] or row["phone_type"] in {"unclassified", "establishment"} for row in companies), "public_establishment_contacts_joined_by_corporate_number": True},
         "sources": {"fuma_xlsx": {"file_name": xlsx.name, "sha256": sha256(xlsx), "redistribution_terms": "user-provided source; confirm applicable terms"}, "national_duckdb": {"file_name": master.name, "release": "v0.9.0"}, "public_establishments": MHLW_SOURCE_URL, "estat": ESTAT_URL},
     }
@@ -1121,7 +1151,7 @@ def data_metadata_path(data_dir: Path) -> Path:
 def make_readme(audit: dict[str, Any]) -> str:
     counts = audit["counts"]
     public_contacts = counts["public_establishment_contacts"]
-    return f"""# CompanyMaster 大分類G（情報通信業）完全版 v{audit['version']}\n\n- Git参照: `{audit['git_ref']}`\n- 対象: 大分類G（中分類37〜41と全小分類・細分類）\n- FUMA全量: {counts['fuma_rows']:,}行\n- 統合企業: {counts['unified_company_rows']:,}件\n- 法人番号付きFUMA: {counts['fuma_corporate_number_rows']:,}件（社名＋住所の一意完全一致で回復 {counts['fuma_recovered_corporate_number_rows']:,}件）\n- FUMA-only: {counts['fuma_only_rows']:,}件\n- 電話付き企業: {counts['company_phone_rows']:,}件（FUMA由来 {counts['fuma_phone_rows']:,}件、公開事業所電話の新規反映 {public_contacts['promoted_primary_phone_rows']:,}件）\n- 公式HP付き企業: {counts['official_url_rows']:,}件\n- 公開事業所HP候補: {counts['website_candidate_rows']:,}件\n- JSICマスター: {counts['taxonomy_rows']:,}件（空分類を含む）\n\n## 起動\n\n`CompanyMaster-G37-41.exe`をこのフォルダから起動してください。ファイル名の`G37-41`は既存配布との互換名で、対象の正本は大分類`G`です。`data`フォルダはEXEと同じ場所に置きます。\n\n## 検索コード\n\n`G`, `37`, `G37`, `39`, `G39`, `391`, `G391`, `3911`, `G3911`を受け付けます。中分類・小分類・細分類は配下を含む前方一致で、細分類は完全なコードとして絞り込めます。\n\n## HP・電話番号\n\n`core.g_companies.phone`にはFUMA電話を優先し、空欄だった企業だけ厚生労働省公開データの事業所電話を反映します。公開事業所電話は`phone_type='establishment'`であり、本社代表電話とは断定しません。全候補と根拠は`enrichment.phone_candidates`、事業所HP候補は`enrichment.website_candidates`に保存しています。法人番号の回復根拠は`corporate_number_match_method`と`corporate_number_match_score`で監査できます。LLMは全社処理せず、根拠のある低信頼候補の確認に限定します。\n\n元Excelの54列はDuckDBの`core.fuma_records.raw_json`と`core.fuma_columns`に保持しています。\n"""
+    return f"""# CompanyMaster 大分類G（情報通信業）完全版 v{audit['version']}\n\n- Git参照: `{audit['git_ref']}`\n- 対象: 大分類G（中分類37〜41と全小分類・細分類）\n- FUMA全量: {counts['fuma_rows']:,}行\n- 統合企業: {counts['unified_company_rows']:,}件\n- 法人番号付きFUMA: {counts['fuma_corporate_number_rows']:,}件（社名＋住所の一意完全一致で回復 {counts['fuma_recovered_corporate_number_rows']:,}件）\n- FUMA-only: {counts['fuma_only_rows']:,}件\n- 電話付き企業: {counts['company_phone_rows']:,}件（FUMA由来 {counts['fuma_phone_rows']:,}件、公開事業所電話の新規反映 {public_contacts['promoted_primary_phone_rows']:,}件）\n- 公式HP付き企業: {counts['official_url_rows']:,}件\n- 公開事業所HP候補: {counts['website_candidate_rows']:,}件\n- JSICマスター: {counts['taxonomy_rows']:,}件（空分類を含む）\n\n## 起動\n\n`CompanyMaster-G37-41.exe`をこのフォルダから起動してください。ファイル名の`G37-41`は既存配布との互換名で、対象の正本は大分類`G`です。`data`フォルダはEXEと同じ場所に置きます。\n\n## 検索コード\n\n`G`, `37`, `G37`, `39`, `G39`, `391`, `G391`, `3911`, `G3911`を受け付けます。中分類・小分類・細分類は配下を含む前方一致で、細分類は完全なコードとして絞り込めます。\n\n## HP・電話番号\n\n`core.g_companies.phone`にはFUMA電話を優先し、空欄だった企業だけ厚生労働省公開データの事業所電話を反映します。公開事業所電話は`phone_type='establishment'`であり、本社代表電話とは断定しません。全候補と根拠は`enrichment.phone_candidates`、事業所HP候補は`enrichment.website_candidates`に保存しています。法人番号の回復根拠は`corporate_number_match_method`と`corporate_number_match_score`で監査できます。LLMは全社処理せず、根拠のある低信頼候補の確認に限定します。\n\n元Excelの{counts['fuma_columns']}列はDuckDBの`core.fuma_records.raw_json`と`core.fuma_columns`に保持しています。\n"""
 
 
 def main() -> None:

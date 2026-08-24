@@ -46,6 +46,15 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+      - name: Require artifact encryption key
+        env:
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 )) || {
+            echo "G_CONTACT_ARTIFACT_KEY must be configured with at least 32 characters." >&2
+            exit 1
+          }
       - name: Install Queria Master
         run: python -m pip install -e .
       - name: Build current information-and-communications public database
@@ -83,10 +92,21 @@ jobs:
           )
           print(json.dumps(summary, ensure_ascii=False, indent=2))
           PY
+      - name: Encrypt public-index artifact
+        env:
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 ))
+          umask 077
+          tar -C collection -czf - jsic39_all.csv jsic39_with_web.csv export_summary.json |
+            openssl enc -aes-256-cbc -pbkdf2 -salt \
+              -pass env:G_CONTACT_ARTIFACT_KEY \
+              -out collection/jsic39-public-index.tar.gz.enc
       - uses: actions/upload-artifact@v4
         with:
           name: jsic39-public-index
-          path: collection/*
+          path: collection/jsic39-public-index.tar.gz.enc
           if-no-files-found: error
           retention-days: 30
 
@@ -110,7 +130,22 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: jsic39-public-index
-          path: collection
+          path: collection-archive
+      - name: Decrypt public-index artifact
+        env:
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 ))
+          umask 077
+          mkdir -p collection
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -pass env:G_CONTACT_ARTIFACT_KEY \
+            -in collection-archive/jsic39-public-index.tar.gz.enc |
+            tar -C collection -xzf -
+          test -s collection/jsic39_all.csv
+          test -s collection/jsic39_with_web.csv
+          test -s collection/export_summary.json
       - name: Prepare prioritized shard and collect phone candidates
         shell: bash
         working-directory: company_scout/public_enrichment
@@ -118,6 +153,11 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
+          [[ "$START_OFFSET" =~ ^[0-9]+$ ]]
+          [[ "$BATCH_SIZE" =~ ^[0-9]+$ ]]
+          [[ "$MAX_PAGES" =~ ^[0-9]+$ ]]
+          (( BATCH_SIZE >= 1 && BATCH_SIZE <= 500 ))
+          (( MAX_PAGES >= 1 && MAX_PAGES <= 10 ))
           OFFSET=$((START_OFFSET + SHARD * BATCH_SIZE))
           WORK="work/shard-${SHARD}"
           mkdir -p "$WORK"
@@ -131,14 +171,34 @@ jobs:
           python official_site_phone_enricher.py \
             --db "$WORK/targets.sqlite3" \
             --output "$WORK/phones.csv" \
+            --progress "$WORK/progress.jsonl" \
+            --summary "$WORK/collection_summary.json" \
             --max-pages "$MAX_PAGES" \
             --max-candidates 5 \
             --sleep 0.75 \
             --timeout 20
+      - name: Encrypt shard artifact
+        working-directory: company_scout/public_enrichment
+        env:
+          SHARD: ${{ matrix.shard }}
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 ))
+          WORK="work/shard-${SHARD}"
+          test -s "$WORK/manifest.csv"
+          test -e "$WORK/progress.jsonl"
+          test -s "$WORK/phones.csv"
+          umask 077
+          tar -C "$WORK" -czf - \
+              manifest.csv progress.jsonl phones.csv prepare_summary.json collection_summary.json |
+            openssl enc -aes-256-cbc -pbkdf2 -salt \
+              -pass env:G_CONTACT_ARTIFACT_KEY \
+              -out "$WORK/jsic39-phone-${SHARD}.tar.gz.enc"
       - uses: actions/upload-artifact@v4
         with:
           name: jsic39-phone-${{ matrix.shard }}
-          path: company_scout/public_enrichment/work/shard-${{ matrix.shard }}/*
+          path: company_scout/public_enrichment/work/shard-${{ matrix.shard }}/jsic39-phone-${{ matrix.shard }}.tar.gz.enc
           if-no-files-found: error
           retention-days: 30
 
@@ -154,11 +214,39 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: jsic39-public-index
-          path: collection
+          path: collection-archive
       - uses: actions/download-artifact@v4
         with:
           pattern: jsic39-phone-*
           path: batches
+      - name: Decrypt merge inputs
+        working-directory: company_scout/public_enrichment
+        env:
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 ))
+          umask 077
+          mkdir -p ../../collection ../../batches/decrypted
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -pass env:G_CONTACT_ARTIFACT_KEY \
+            -in ../../collection-archive/jsic39-public-index.tar.gz.enc |
+            tar -C ../../collection -xzf -
+          test -s ../../collection/jsic39_all.csv
+          test -s ../../collection/export_summary.json
+          mapfile -t SHARD_ARCHIVES < <(find ../../batches -type f -name 'jsic39-phone-*.tar.gz.enc' | sort)
+          (( ${#SHARD_ARCHIVES[@]} == 8 )) || {
+            echo "Expected 8 encrypted JSIC39 shard artifacts." >&2
+            exit 1
+          }
+          for archive in "${SHARD_ARCHIVES[@]}"; do
+            shard_name="$(basename "$archive" .tar.gz.enc)"
+            shard_dir="../../batches/decrypted/$shard_name"
+            mkdir -p "$shard_dir"
+            openssl enc -d -aes-256-cbc -pbkdf2 \
+              -pass env:G_CONTACT_ARTIFACT_KEY -in "$archive" |
+              tar -C "$shard_dir" -xzf -
+          done
       - name: Merge the public index and phone evidence
         shell: bash
         working-directory: company_scout/public_enrichment
@@ -167,14 +255,27 @@ jobs:
           mkdir -p output
           python jsic39_collection.py merge \
             --all-companies ../../collection/jsic39_all.csv \
-            --manifest '../../batches/**/manifest.csv' \
-            --phones '../../batches/**/phones.csv' \
+            --manifest '../../batches/decrypted/**/manifest.csv' \
+            --phones '../../batches/decrypted/**/phones.csv' \
+            --progress '../../batches/decrypted/**/progress.jsonl' \
             --output output/jsic39_public_contacts.csv \
             --summary output/jsic39_collection_summary.json
           cp ../../collection/export_summary.json output/export_summary.json
+      - name: Encrypt merged contact artifact
+        working-directory: company_scout/public_enrichment
+        env:
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 ))
+          umask 077
+          tar -C output -czf - jsic39_public_contacts.csv jsic39_collection_summary.json export_summary.json |
+            openssl enc -aes-256-cbc -pbkdf2 -salt \
+              -pass env:G_CONTACT_ARTIFACT_KEY \
+              -out output/jsic39-contact-batch.tar.gz.enc
       - uses: actions/upload-artifact@v4
         with:
           name: jsic39-contact-batch
-          path: company_scout/public_enrichment/output/*
+          path: company_scout/public_enrichment/output/jsic39-contact-batch.tar.gz.enc
           if-no-files-found: error
           retention-days: 30

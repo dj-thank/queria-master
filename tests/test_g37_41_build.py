@@ -1,9 +1,39 @@
 from pathlib import Path
 
 import sys
+from openpyxl import Workbook
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import build_g37_41_fuma as builder
+
+
+def test_load_fuma_accepts_current_schema_by_required_headers_not_fixed_column_count(tmp_path: Path):
+    workbook = Workbook()
+    workbook.active.title = "FUMA収集進捗"
+    database = workbook.create_sheet("企業DB")
+    required = [
+        "企業名",
+        "FUMA_ID",
+        "本店所在地",
+        "法人番号",
+        "daibunruiCode",
+        "chubunruiCode",
+        "syoubunruiCode",
+        "jsicDetailedClass",
+        "電話番号",
+        "公式サイトURL",
+    ]
+    headers = required + [f"追加列{index}" for index in range(36)]
+    database.append(headers)
+    database.append(["テスト株式会社", "fuma-1", "東京都千代田区1-1-1", "1234567890123", "G", "39", "391", "3911", "03-1234-5678", "https://example.jp/", *([None] * 36)])
+    path = tmp_path / "fuma-current.xlsx"
+    workbook.save(path)
+
+    loaded_headers, records, header_index = builder.load_fuma(path)
+
+    assert len(loaded_headers) == 46
+    assert records[0]["by_header"]["企業名"] == "テスト株式会社"
+    assert header_index["公式サイトURL"] == 9
 
 
 def test_taxonomy_aliases_and_ancestors():

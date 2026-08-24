@@ -13,6 +13,7 @@
 - 電話番号とともに種別候補、根拠URL、周辺テキスト、抽出方法、信頼度、取得日時を保存する
 - FAX、採用、サポート、広報・IR、個人情報相談、支店番号を代表電話と混同しない
 - 見つからなかった企業も処理済みとして記録し、再開位置を管理する
+- 対象manifestを処理完了の証拠にせず、1社ごとのappend-only `progress.jsonl`だけを完了証拠にする
 
 ## 2つの収集経路
 
@@ -79,9 +80,16 @@ python corporate_index_matcher.py `
 | 状態 | 意味 |
 | --- | --- |
 | `phone_candidate_found` | 公式サイト内で1件以上の電話番号候補と根拠を取得 |
+| `fax_only` | FAX候補だけを取得。通話可能な電話番号の成功件数には含めない |
 | `processed_no_phone` | 規定ページを確認したが電話番号候補なし |
 | `website_pending` | 公式URLあり、まだ今回のバッチでは未処理 |
 | `website_missing` | 公開法人データ上で公式URLを確認できない |
+| `blocked_by_policy` | URL安全性またはrobots.txtで取得を拒否 |
+| `needs_review` | robots.txt取得不能やページ取得失敗のため、未取得と断定せず要確認 |
+
+`manifest.csv`は処理予定、`progress.jsonl`は実際に完了した企業、`phones.csv`は候補の表示用CSVです。途中停止後は同じ`progress.jsonl`を指定して再実行すると完了企業をスキップします。merge時もmanifestだけでは`processed_no_phone`へ昇格しません。
+
+一時的な取得失敗だけを再試行する場合は、成功済みを消さずに `--retry-state needs_review` を追加します。robots拒否を無断で再試行したり、全進捗を消したりしません。
 
 ## ローカル実行：公開業種39経路
 
@@ -119,6 +127,8 @@ python jsic39_collection.py prepare-shard `
 python official_site_phone_enricher.py `
   --db work\shard-0\targets.sqlite3 `
   --output work\shard-0\phones.csv `
+  --progress work\shard-0\progress.jsonl `
+  --summary work\shard-0\collection_summary.json `
   --max-pages 4 `
   --max-candidates 5 `
   --sleep 0.75 `
@@ -132,6 +142,7 @@ python jsic39_collection.py merge `
   --all-companies ..\..\collection\jsic39_all.csv `
   --manifest "work\shard-*\manifest.csv" `
   --phones "work\shard-*\phones.csv" `
+  --progress "work\shard-*\progress.jsonl" `
   --output output\jsic39_public_contacts.csv `
   --summary output\jsic39_collection_summary.json
 ```

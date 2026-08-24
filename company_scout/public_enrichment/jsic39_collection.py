@@ -26,6 +26,13 @@ PHONE_TYPE_PRIORITY = {
     "未分類": 8,
     "FAX": 9,
 }
+TERMINAL_PROGRESS_STATES = {
+    "phone_candidate_found",
+    "fax_only",
+    "processed_no_phone",
+    "blocked_by_policy",
+    "needs_review",
+}
 
 
 def clean(value: Any) -> str:
@@ -41,6 +48,12 @@ def as_int(value: Any) -> int:
         return 0
 
 
+def normalize_progress_phone(value: Any) -> str:
+    text = clean(value).replace("+81", "0")
+    digits = re.sub(r"\D", "", text)
+    return digits if 10 <= len(digits) <= 11 and digits.startswith("0") else ""
+
+
 def normalize_url(value: Any) -> str:
     text = clean(value)
     if not text:
@@ -51,6 +64,18 @@ def normalize_url(value: Any) -> str:
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         return ""
     return text
+
+
+def url_binding(value: Any) -> tuple[str, str, str]:
+    normalized = normalize_url(value)
+    if not normalized:
+        return "", "", ""
+    parsed = urlparse(normalized)
+    return (
+        (parsed.hostname or "").lower().removeprefix("www."),
+        parsed.path.rstrip("/") or "/",
+        parsed.query,
+    )
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -112,7 +137,10 @@ def prepare_shard(
                 source_row INTEGER NOT NULL,
                 company_name TEXT NOT NULL,
                 address TEXT,
-                security_code TEXT
+                security_code TEXT,
+                scope_label TEXT,
+                dataset_generation TEXT,
+                runtime_binding_status TEXT
             );
             CREATE TABLE corporate_matches(
                 source_id TEXT PRIMARY KEY REFERENCES companies(source_id) ON DELETE CASCADE,
@@ -133,8 +161,17 @@ def prepare_shard(
             address = clean(row.get("prefecture_name")) + clean(row.get("city_name"))
             website = normalize_url(row.get("company_url"))
             connection.execute(
-                "INSERT INTO companies(source_id,source_row,company_name,address,security_code) VALUES(?,?,?,?,?)",
-                (local_source_id, local_index + 1, company_name, address, ""),
+                "INSERT INTO companies(source_id,source_row,company_name,address,security_code,scope_label,dataset_generation,runtime_binding_status) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    local_source_id,
+                    local_index + 1,
+                    company_name,
+                    address,
+                    "",
+                    clean(row.get("scope_label")),
+                    clean(row.get("dataset_generation")),
+                    clean(row.get("runtime_binding_status")),
+                ),
             )
             connection.execute(
                 "INSERT INTO corporate_matches(source_id,corporate_number,status) VALUES(?,?,?)",
@@ -151,6 +188,11 @@ def prepare_shard(
                     "企業名": company_name,
                     "都道府県": clean(row.get("prefecture_name")),
                     "市区町村": clean(row.get("city_name")),
+                    "スコープ": clean(row.get("scope_label")),
+                    "データ世代": clean(row.get("dataset_generation")),
+                    "JSIC大分類": clean(row.get("jsic_major_codes")),
+                    "JSIC中分類": clean(row.get("jsic_middle_codes")),
+                    "正本照合": clean(row.get("runtime_binding_status")),
                     "従業員数": clean(row.get("employee_number")),
                     "資本金": clean(row.get("capital_stock")),
                     "公式サイトURL": website,
@@ -168,6 +210,11 @@ def prepare_shard(
         "企業名",
         "都道府県",
         "市区町村",
+        "スコープ",
+        "データ世代",
+        "JSIC大分類",
+        "JSIC中分類",
+        "正本照合",
         "従業員数",
         "資本金",
         "公式サイトURL",
@@ -176,6 +223,8 @@ def prepare_shard(
     write_csv(manifest, manifest_fields, manifest_rows)
     result = {
         "companies_with_web": len(rows),
+        "scope_labels": sorted({clean(row.get("scope_label")) for row in selected if clean(row.get("scope_label"))}),
+        "dataset_generations": sorted({clean(row.get("dataset_generation")) for row in selected if clean(row.get("dataset_generation"))}),
         "offset": offset,
         "limit": limit,
         "selected": len(selected),
@@ -205,6 +254,28 @@ def _expand_patterns(patterns: list[str]) -> list[Path]:
     return sorted(paths)
 
 
+def _read_progress_jsonl(patterns: list[str]) -> tuple[dict[str, dict[str, Any]], list[Path]]:
+    """Return the latest durable completion record for each corporate number."""
+    paths = _expand_patterns(patterns)
+    latest: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Invalid progress JSONL: {path}:{line_number}") from exc
+                corporate_number = clean(record.get("corporate_number"))
+                state = clean(record.get("state"))
+                if not corporate_number or state not in TERMINAL_PROGRESS_STATES:
+                    raise ValueError(f"Progress record has invalid corporate_number/state: {path}:{line_number}")
+                latest[corporate_number] = record
+    return latest, paths
+
+
 def _candidate_key(row: dict[str, str]) -> tuple[float, int, int, int]:
     confidence = float(clean(row.get("信頼度")) or 0)
     rank = as_int(row.get("候補順位")) or 999999
@@ -223,25 +294,128 @@ def merge_batches(
     all_companies_csv: Path,
     manifests: list[str],
     phone_files: list[str],
+    progress_files: list[str] | None = None,
+    legacy_manifest_completion: bool = False,
+    scope_label: str = "JSIC39",
     output: Path,
     summary: Path,
 ) -> dict[str, Any]:
     all_rows = read_csv(all_companies_csv)
     manifest_paths = _expand_patterns(manifests)
     phone_paths = _expand_patterns(phone_files)
+    if not manifest_paths:
+        raise FileNotFoundError("No manifest artifacts were found")
 
-    processed: set[str] = set()
+    all_by_company: dict[str, dict[str, str]] = {}
+    for row in all_rows:
+        corporate_number = clean(row.get("corporate_number"))
+        if not corporate_number:
+            continue
+        if corporate_number in all_by_company:
+            raise ValueError(f"Duplicate corporate number in company universe: {corporate_number}")
+        all_by_company[corporate_number] = row
+
+    targeted: set[str] = set()
+    manifest_by_company: dict[str, dict[str, str]] = {}
     for path in manifest_paths:
         for row in read_csv(path):
-            processed.add(clean(row.get("法人番号")))
+            corporate_number = clean(row.get("法人番号"))
+            if corporate_number:
+                if corporate_number in manifest_by_company:
+                    raise ValueError(f"Duplicate corporate number across manifests: {corporate_number}")
+                company_row = all_by_company.get(corporate_number)
+                if company_row is None:
+                    raise ValueError(f"Manifest company is outside the company universe: {corporate_number}")
+                if url_binding(row.get("公式サイトURL")) != url_binding(company_row.get("company_url")):
+                    raise ValueError(f"Manifest official site mismatch: {corporate_number}")
+                if clean(row.get("スコープ")) != clean(company_row.get("scope_label")):
+                    raise ValueError(f"Manifest scope mismatch: {corporate_number}")
+                if clean(row.get("データ世代")) != clean(company_row.get("dataset_generation")):
+                    raise ValueError(f"Manifest generation mismatch: {corporate_number}")
+                if clean(row.get("正本照合")) != clean(company_row.get("runtime_binding_status")):
+                    raise ValueError(f"Manifest runtime binding mismatch: {corporate_number}")
+                targeted.add(corporate_number)
+                manifest_by_company[corporate_number] = row
+
+    requested_progress = list(progress_files or [])
+    missing_progress_patterns = [
+        pattern
+        for pattern in requested_progress
+        if not glob.glob(pattern, recursive=True) and not Path(pattern).is_file()
+    ]
+    if missing_progress_patterns:
+        raise FileNotFoundError(f"Requested progress artifact was not found: {missing_progress_patterns}")
+    progress_by_company, progress_paths = _read_progress_jsonl(requested_progress)
+    if not progress_paths and not legacy_manifest_completion:
+        raise ValueError("progress artifact is required unless legacy_manifest_completion is explicit")
+    for corporate_number, record in progress_by_company.items():
+        manifest_row = manifest_by_company.get(corporate_number)
+        if manifest_row is None:
+            raise ValueError(f"Progress company is outside the manifests: {corporate_number}")
+        if url_binding(record.get("official_site_url")) != url_binding(manifest_row.get("公式サイトURL")):
+            raise ValueError(f"Progress official site mismatch: {corporate_number}")
+        for progress_field, manifest_field in (
+            ("scope_label", "スコープ"),
+            ("dataset_generation", "データ世代"),
+            ("runtime_binding_status", "正本照合"),
+        ):
+            if clean(record.get(progress_field)) != clean(manifest_row.get(manifest_field)):
+                raise ValueError(f"Progress {progress_field} mismatch: {corporate_number}")
+        candidates = record.get("candidates") or []
+        if not isinstance(candidates, list) or any(not isinstance(candidate, dict) for candidate in candidates):
+            raise ValueError(f"Progress candidates are invalid: {corporate_number}")
+        target_host = url_binding(manifest_row.get("公式サイトURL"))[0]
+        for candidate in candidates:
+            if url_binding(candidate.get("url"))[0] != target_host:
+                raise ValueError(f"Progress candidate host mismatch: {corporate_number}")
+            if not normalize_progress_phone(candidate.get("phone")):
+                raise ValueError(f"Progress phone candidate is invalid: {corporate_number}")
+            if clean(candidate.get("candidate_type")) not in PHONE_TYPE_PRIORITY:
+                raise ValueError(f"Progress candidate type is invalid: {corporate_number}")
+        state = clean(record.get("state"))
+        voice_candidates = [candidate for candidate in candidates if clean(candidate.get("candidate_type")) != "FAX"]
+        if state == "phone_candidate_found" and not voice_candidates:
+            raise ValueError(f"Progress state/candidates mismatch: {corporate_number}")
+        if state == "fax_only" and (not candidates or voice_candidates):
+            raise ValueError(f"Progress state/candidates mismatch: {corporate_number}")
+        if state in {"processed_no_phone", "blocked_by_policy", "needs_review"} and candidates:
+            raise ValueError(f"Progress state/candidates mismatch: {corporate_number}")
+    processed = set(progress_by_company) if progress_paths else set(targeted)
 
     candidates_by_company: dict[str, dict[str, dict[str, str]]] = {}
-    for path in phone_paths:
-        for row in read_csv(path):
-            corporate_number = clean(row.get("法人番号"))
-            phone_digits = re.sub(r"\D", "", clean(row.get("電話番号")))
-            if not corporate_number or not phone_digits:
-                continue
+    # A modern run treats the bound, append-only progress log as the only
+    # candidate source. The CSV export is a convenience artifact and may lag a
+    # progress fsync after interruption. Legacy imports without progress retain
+    # the previous CSV behavior behind the explicit compatibility flag.
+    if not progress_paths:
+        for path in phone_paths:
+            for row in read_csv(path):
+                corporate_number = clean(row.get("法人番号"))
+                phone_digits = re.sub(r"\D", "", clean(row.get("電話番号")))
+                if not corporate_number or not phone_digits:
+                    continue
+                company_candidates = candidates_by_company.setdefault(corporate_number, {})
+                current = company_candidates.get(phone_digits)
+                if current is None or _candidate_key(row) > _candidate_key(current):
+                    company_candidates[phone_digits] = row
+
+    # The append-only progress log is the crash-safe source of truth. Rebuild
+    # candidate rows from it so a process interruption between progress commit
+    # and CSV export cannot lose successful evidence.
+    for corporate_number, progress_record in progress_by_company.items():
+        for rank, candidate in enumerate(progress_record.get("candidates") or [], start=1):
+            phone_digits = normalize_progress_phone(candidate.get("phone"))
+            row = {
+                "法人番号": corporate_number,
+                "候補順位": str(rank),
+                "電話番号": clean(candidate.get("phone")),
+                "電話種別候補": clean(candidate.get("candidate_type")) or "未分類",
+                "根拠URL": clean(candidate.get("url")),
+                "根拠テキスト": clean(candidate.get("context")),
+                "抽出方法": clean(candidate.get("source")),
+                "信頼度": str(candidate.get("score") or 0),
+                "取得日時": clean(progress_record.get("completed_at")),
+            }
             company_candidates = candidates_by_company.setdefault(corporate_number, {})
             current = company_candidates.get(phone_digits)
             if current is None or _candidate_key(row) > _candidate_key(current):
@@ -249,6 +423,7 @@ def merge_batches(
 
     output_rows: list[dict[str, Any]] = []
     website_count = processed_count = companies_with_phone = candidate_total = 0
+    companies_with_voice = fax_only_companies = voice_candidate_total = 0
     for row in all_rows:
         corporate_number = clean(row.get("corporate_number"))
         website = normalize_url(row.get("company_url"))
@@ -258,6 +433,7 @@ def merge_batches(
             reverse=True,
         )
         best = candidates[0] if candidates else {}
+        voice_candidates = [candidate for candidate in candidates if clean(candidate.get("電話種別候補")) != "FAX"]
         if website:
             website_count += 1
         if corporate_number in processed:
@@ -265,10 +441,18 @@ def merge_batches(
         if candidates:
             companies_with_phone += 1
             candidate_total += len(candidates)
-        if candidates:
+        if voice_candidates:
+            companies_with_voice += 1
+            voice_candidate_total += len(voice_candidates)
+        elif candidates:
+            fax_only_companies += 1
+        if voice_candidates:
             status = "phone_candidate_found"
+        elif candidates:
+            status = "fax_only"
         elif corporate_number in processed:
-            status = "processed_no_phone"
+            progress_state = clean(progress_by_company.get(corporate_number, {}).get("state"))
+            status = progress_state if progress_state and progress_state != "phone_candidate_found" else "processed_no_phone"
         elif website:
             status = "website_pending"
         else:
@@ -339,13 +523,20 @@ def merge_batches(
     ]
     write_csv(output, fields, output_rows)
     result = {
+        "scope": scope_label,
         "companies": len(all_rows),
         "companies_with_web": website_count,
+        "targeted_for_phone": len(targeted),
         "processed_for_phone": processed_count,
         "companies_with_phone_candidates": companies_with_phone,
         "phone_candidates_total": candidate_total,
+        "companies_with_voice_candidates": companies_with_voice,
+        "voice_phone_candidates_total": voice_candidate_total,
+        "fax_only_companies": fax_only_companies,
         "manifest_files": [str(path) for path in manifest_paths],
         "phone_files": [str(path) for path in phone_paths],
+        "progress_files": [str(path) for path in progress_paths],
+        "legacy_manifest_completion": legacy_manifest_completion,
         "output": str(output),
     }
     summary.parent.mkdir(parents=True, exist_ok=True)
@@ -370,6 +561,13 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--all-companies", type=Path, required=True)
     merge.add_argument("--manifest", action="append", default=[], required=True)
     merge.add_argument("--phones", action="append", default=[], required=True)
+    merge.add_argument("--progress", action="append", default=[])
+    merge.add_argument(
+        "--legacy-manifest-completion",
+        action="store_true",
+        help="旧成果物のみ: manifestを処理済み証拠として扱う",
+    )
+    merge.add_argument("--scope-label", default="JSIC39")
     merge.add_argument("--output", type=Path, required=True)
     merge.add_argument("--summary", type=Path, required=True)
     return parser
@@ -392,6 +590,9 @@ def main() -> int:
             all_companies_csv=args.all_companies,
             manifests=args.manifest,
             phone_files=args.phones,
+            progress_files=args.progress,
+            legacy_manifest_completion=args.legacy_manifest_completion,
+            scope_label=args.scope_label,
             output=args.output,
             summary=args.summary,
         )

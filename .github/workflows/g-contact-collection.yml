@@ -1,0 +1,273 @@
+name: G37-G41 official contact collection
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release containing phone_targets_g37_41.csv
+        required: false
+        default: "v0.10.0"
+      start_offset:
+        description: Start position within prioritized pending official sites
+        required: false
+        default: "0"
+      batch_size:
+        description: Companies per shard (8 shards; default total 1,000)
+        required: false
+        default: "125"
+      max_pages:
+        description: Maximum same-host pages per company
+        required: false
+        default: "4"
+      prior_run_id:
+        description: Optional prior run ID with matching g-contact-shard-* artifacts
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: g-contact-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  RELEASE_TAG: ${{ github.event.inputs.release_tag || 'v0.10.0' }}
+  START_OFFSET: ${{ github.event.inputs.start_offset || '0' }}
+  BATCH_SIZE: ${{ github.event.inputs.batch_size || '125' }}
+  MAX_PAGES: ${{ github.event.inputs.max_pages || '4' }}
+  PRIOR_RUN_ID: ${{ github.event.inputs.prior_run_id || '' }}
+
+jobs:
+  download-g-targets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Download reviewed G target ledger from Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || {
+            echo "Invalid release_tag." >&2
+            exit 1
+          }
+          mkdir -p collection
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern phone_targets_g37_41.csv \
+            --pattern queria_runtime_g_fuma.duckdb \
+            --dir collection
+          test -s collection/phone_targets_g37_41.csv
+          test -s collection/queria_runtime_g_fuma.duckdb
+      - name: Restore company names and priority fields from the same Release generation
+        run: |
+          set -euo pipefail
+          python -m pip install "duckdb>=1.5.5,<2"
+          python scripts/enrich_g_contact_targets.py \
+            --targets collection/phone_targets_g37_41.csv \
+            --database collection/queria_runtime_g_fuma.duckdb \
+            --output collection/phone_targets_g37_41_enriched.csv \
+            --require-complete
+      - name: Encrypt cross-job target artifact
+        env:
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 )) || {
+            echo "G_CONTACT_ARTIFACT_KEY must be configured with at least 32 characters." >&2
+            exit 1
+          }
+          umask 077
+          tar -C collection -czf - phone_targets_g37_41_enriched.csv |
+            openssl enc -aes-256-cbc -pbkdf2 -salt \
+              -pass env:G_CONTACT_ARTIFACT_KEY \
+              -out collection/g-contact-targets.tar.gz.enc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g-contact-targets
+          path: collection/g-contact-targets.tar.gz.enc
+          if-no-files-found: error
+          retention-days: 90
+
+  crawl-known-official-sites:
+    needs: download-g-targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install crawler dependencies
+        working-directory: company_scout/public_enrichment
+        run: python -m pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: g-contact-targets
+          path: collection-archive
+      - name: Decrypt target artifact
+        env:
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 ))
+          umask 077
+          mkdir -p collection
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -pass env:G_CONTACT_ARTIFACT_KEY \
+            -in collection-archive/g-contact-targets.tar.gz.enc |
+            tar -C collection -xzf -
+          test -s collection/phone_targets_g37_41_enriched.csv
+      - name: Prepare shard, restore matching progress, and crawl
+        shell: bash
+        working-directory: company_scout/public_enrichment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHARD: ${{ matrix.shard }}
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          [[ "$START_OFFSET" =~ ^[0-9]+$ ]]
+          [[ "$BATCH_SIZE" =~ ^[0-9]+$ ]]
+          [[ "$MAX_PAGES" =~ ^[0-9]+$ ]]
+          (( BATCH_SIZE >= 1 && BATCH_SIZE <= 500 ))
+          (( MAX_PAGES >= 1 && MAX_PAGES <= 10 ))
+          if [[ -n "$PRIOR_RUN_ID" ]]; then
+            [[ "$PRIOR_RUN_ID" =~ ^[0-9]+$ ]] || {
+              echo "Invalid prior_run_id." >&2
+              exit 1
+            }
+          fi
+          OFFSET=$((START_OFFSET + SHARD * BATCH_SIZE))
+          WORK="work/shard-${SHARD}"
+          mkdir -p "$WORK"
+          python jsic_g37_41_collection.py \
+            --targets ../../collection/phone_targets_g37_41_enriched.csv \
+            --database "$WORK/targets.sqlite3" \
+            --manifest "$WORK/manifest.csv" \
+            --summary "$WORK/prepare_summary.json" \
+            --offset "$OFFSET" \
+            --limit "$BATCH_SIZE"
+
+          if [[ -n "$PRIOR_RUN_ID" ]]; then
+            mkdir -p "$WORK/prior-archive" "$WORK/prior"
+            gh run download "$PRIOR_RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "g-contact-shard-${SHARD}" \
+              --dir "$WORK/prior-archive"
+            openssl enc -d -aes-256-cbc -pbkdf2 \
+              -pass env:G_CONTACT_ARTIFACT_KEY \
+              -in "$WORK/prior-archive/g-contact-shard-${SHARD}.tar.gz.enc" |
+              tar -C "$WORK/prior" -xzf -
+            test -s "$WORK/prior/manifest.csv"
+            test -e "$WORK/prior/progress.jsonl"
+            cmp --silent "$WORK/prior/manifest.csv" "$WORK/manifest.csv" || {
+              echo "Prior progress manifest does not match this shard." >&2
+              exit 1
+            }
+            cp "$WORK/prior/progress.jsonl" "$WORK/progress.jsonl"
+          fi
+
+          python official_site_phone_enricher.py \
+            --db "$WORK/targets.sqlite3" \
+            --output "$WORK/phones.csv" \
+            --progress "$WORK/progress.jsonl" \
+            --summary "$WORK/collection_summary.json" \
+            --max-pages "$MAX_PAGES" \
+            --max-candidates 5 \
+            --sleep 0.75 \
+            --timeout 20
+
+          test -s "$WORK/manifest.csv"
+          test -e "$WORK/progress.jsonl"
+          umask 077
+          tar -C "$WORK" -czf - \
+              manifest.csv progress.jsonl phones.csv prepare_summary.json collection_summary.json |
+            openssl enc -aes-256-cbc -pbkdf2 -salt \
+              -pass env:G_CONTACT_ARTIFACT_KEY \
+              -out "$WORK/g-contact-shard-${SHARD}.tar.gz.enc"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g-contact-shard-${{ matrix.shard }}
+          path: company_scout/public_enrichment/work/shard-${{ matrix.shard }}/g-contact-shard-${{ matrix.shard }}.tar.gz.enc
+          if-no-files-found: error
+          retention-days: 90
+
+  merge-g-contact-batch:
+    needs: [download-g-targets, crawl-known-official-sites]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: g-contact-targets
+          path: collection-archive
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: g-contact-shard-*
+          path: batches
+      - name: Merge only completed per-company progress
+        shell: bash
+        working-directory: company_scout/public_enrichment
+        env:
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+        run: |
+          set -euo pipefail
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 ))
+          umask 077
+          mkdir -p ../../collection ../../batches/decrypted
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -pass env:G_CONTACT_ARTIFACT_KEY \
+            -in ../../collection-archive/g-contact-targets.tar.gz.enc |
+            tar -C ../../collection -xzf -
+          mapfile -t SHARD_ARCHIVES < <(find ../../batches -type f -name 'g-contact-shard-*.tar.gz.enc' | sort)
+          (( ${#SHARD_ARCHIVES[@]} == 8 )) || {
+            echo "Expected 8 encrypted shard artifacts." >&2
+            exit 1
+          }
+          for archive in "${SHARD_ARCHIVES[@]}"; do
+            shard_name="$(basename "$archive" .tar.gz.enc)"
+            shard_dir="../../batches/decrypted/$shard_name"
+            mkdir -p "$shard_dir"
+            openssl enc -d -aes-256-cbc -pbkdf2 \
+              -pass env:G_CONTACT_ARTIFACT_KEY -in "$archive" |
+              tar -C "$shard_dir" -xzf -
+          done
+          mkdir -p output
+          python export_g_contact_targets.py \
+            --targets ../../collection/phone_targets_g37_41_enriched.csv \
+            --output output/g_contact_targets.csv
+          python jsic39_collection.py merge \
+            --all-companies output/g_contact_targets.csv \
+            --manifest '../../batches/decrypted/**/manifest.csv' \
+            --phones '../../batches/decrypted/**/phones.csv' \
+            --progress '../../batches/decrypted/**/progress.jsonl' \
+            --scope-label G37-G41 \
+            --output output/g_public_contacts.csv \
+            --summary output/g_collection_summary.json
+          tar -C output -czf - g_contact_targets.csv g_public_contacts.csv g_collection_summary.json |
+            openssl enc -aes-256-cbc -pbkdf2 -salt \
+              -pass env:G_CONTACT_ARTIFACT_KEY \
+              -out output/g-contact-batch.tar.gz.enc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g-contact-batch
+          path: company_scout/public_enrichment/output/g-contact-batch.tar.gz.enc
+          if-no-files-found: error
+          retention-days: 90

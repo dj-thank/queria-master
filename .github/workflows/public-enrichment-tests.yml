@@ -4,10 +4,12 @@ on:
   push:
     paths:
       - "company_scout/public_enrichment/**"
+      - ".github/workflows/g-contact-collection.yml"
       - ".github/workflows/public-enrichment-tests.yml"
   pull_request:
     paths:
       - "company_scout/public_enrichment/**"
+      - ".github/workflows/g-contact-collection.yml"
       - ".github/workflows/public-enrichment-tests.yml"
 
 permissions:
@@ -37,6 +39,8 @@ jobs:
           official_site_phone_enricher.py
           import_verified_contacts.py
           jsic39_collection.py
+          jsic_g37_41_collection.py
+          export_g_contact_targets.py
           corporate_index_matcher.py
       - name: Unit tests
         working-directory: company_scout/public_enrichment

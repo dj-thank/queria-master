@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""G37-G41 adapter for the main@b16fb642 official-site phone pipeline.
+"""Release-generation-bound G37-G41 adapter for the official-site phone pipeline.
 
 The upstream collector is intentionally source-neutral and currently named
 ``jsic39_collection``.  This adapter feeds it the complete G37-G41 target
@@ -18,24 +18,75 @@ from pathlib import Path
 from jsic39_collection import prepare_shard
 
 
+REQUIRED_SCOPE_HEADERS = {
+    "scope_label",
+    "dataset_generation",
+    "jsic_major_codes",
+    "jsic_middle_codes",
+    "runtime_binding_status",
+}
+ALLOWED_MIDDLE_CODES = {"", "37", "38", "39", "40", "41"}
+
+
 def make_target_csv(source: Path) -> Path:
+    with source.open("r", encoding="utf-8-sig", newline="") as source_handle:
+        reader = csv.DictReader(source_handle)
+        source_headers = set(reader.fieldnames or [])
+        missing = sorted(REQUIRED_SCOPE_HEADERS.difference(source_headers))
+        if missing:
+            raise ValueError(f"G scope headers are missing: {missing}")
+        rows = list(reader)
+
+    generations: set[str] = set()
+    for index, row in enumerate(rows, start=2):
+        scope_label = (row.get("scope_label") or "").strip()
+        generation = (row.get("dataset_generation") or "").strip()
+        major = (row.get("jsic_major_codes") or "").strip()
+        middle = (row.get("jsic_middle_codes") or "").strip()
+        binding_status = (row.get("runtime_binding_status") or "").strip()
+        if (
+            scope_label != "G37-G41"
+            or not generation
+            or major != "G"
+            or middle not in ALLOWED_MIDDLE_CODES
+            or binding_status != "matched"
+        ):
+            raise ValueError(f"G scope binding is invalid at row {index}")
+        generations.add(generation)
+    if len(generations) != 1:
+        raise ValueError(f"G scope must use exactly one dataset generation: {sorted(generations)}")
+
     handle = tempfile.NamedTemporaryFile(prefix="g37_41_targets_", suffix=".csv", delete=False, mode="w", encoding="utf-8-sig", newline="")
     path = Path(handle.name)
     with handle:
-        reader = csv.DictReader(source.open("r", encoding="utf-8-sig", newline=""))
-        writer = csv.DictWriter(handle, fieldnames=["corporate_number", "company_name", "prefecture_name", "city_name", "employee_number", "capital_stock", "company_url"])
+        writer = csv.DictWriter(handle, fieldnames=[
+            "corporate_number", "company_name", "prefecture_name", "city_name",
+            "scope_label", "dataset_generation", "jsic_major_codes", "jsic_middle_codes",
+            "runtime_binding_status", "employee_number", "capital_stock", "company_url",
+        ])
         writer.writeheader()
-        for row in reader:
+        for row in rows:
             corporate_number = (row.get("corporate_number") or "").strip()
             website = (row.get("website") or "").strip()
-            if len(corporate_number) == 13 and corporate_number.isdigit() and website:
+            state = (row.get("state") or "").strip()
+            if (
+                state == "pending_official_site"
+                and len(corporate_number) == 13
+                and corporate_number.isdigit()
+                and website
+            ):
                 writer.writerow({
                     "corporate_number": corporate_number,
-                    "company_name": row.get("entity_key") or corporate_number,
-                    "prefecture_name": "",
-                    "city_name": "",
-                    "employee_number": "",
-                    "capital_stock": "",
+                    "company_name": row.get("company_name") or row.get("entity_key") or corporate_number,
+                    "prefecture_name": row.get("prefecture_name") or "",
+                    "city_name": row.get("city_name") or "",
+                    "scope_label": row["scope_label"],
+                    "dataset_generation": row["dataset_generation"],
+                    "jsic_major_codes": row["jsic_major_codes"],
+                    "jsic_middle_codes": row["jsic_middle_codes"],
+                    "runtime_binding_status": row["runtime_binding_status"],
+                    "employee_number": row.get("employee_number") or "",
+                    "capital_stock": row.get("capital_stock") or "",
                     "company_url": website,
                 })
     return path

@@ -82,6 +82,46 @@ class Jsic39CollectionTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def manifest_row(self, corporate_number: str) -> dict[str, str]:
+        websites = {
+            "1000000000001": "https://alpha.example/",
+            "1000000000002": "https://beta.example",
+        }
+        return {
+            "法人番号": corporate_number,
+            "公式サイトURL": websites[corporate_number],
+            "スコープ": "",
+            "データ世代": "",
+            "正本照合": "",
+        }
+
+    def write_manifest(self, path: Path, *corporate_numbers: str) -> None:
+        module.write_csv(
+            path,
+            ["法人番号", "公式サイトURL", "スコープ", "データ世代", "正本照合"],
+            [self.manifest_row(number) for number in corporate_numbers],
+        )
+
+    def test_prepare_shard_rejects_invalid_ranges(self) -> None:
+        with self.assertRaisesRegex(ValueError, "offset"):
+            module.prepare_shard(
+                companies_csv=self.companies,
+                database=self.root / "negative.sqlite3",
+                manifest=self.root / "negative.csv",
+                offset=-1,
+                limit=1,
+                summary=None,
+            )
+        with self.assertRaisesRegex(ValueError, "limit"):
+            module.prepare_shard(
+                companies_csv=self.companies,
+                database=self.root / "zero.sqlite3",
+                manifest=self.root / "zero.csv",
+                offset=0,
+                limit=0,
+                summary=None,
+            )
+
     def test_prepare_shard_prioritizes_and_builds_compatible_db(self) -> None:
         database = self.root / "shard.sqlite3"
         manifest = self.root / "manifest.csv"
@@ -113,11 +153,7 @@ class Jsic39CollectionTest(unittest.TestCase):
 
     def test_merge_preserves_multiple_candidates_and_progress_states(self) -> None:
         manifest = self.root / "manifest.csv"
-        module.write_csv(
-            manifest,
-            ["法人番号"],
-            [{"法人番号": "1000000000001"}, {"法人番号": "1000000000002"}],
-        )
+        self.write_manifest(manifest, "1000000000001", "1000000000002")
         phones = self.root / "phones.csv"
         module.write_csv(
             phones,
@@ -163,6 +199,7 @@ class Jsic39CollectionTest(unittest.TestCase):
             all_companies_csv=self.companies,
             manifests=[str(manifest)],
             phone_files=[str(phones)],
+            legacy_manifest_completion=True,
             output=output,
             summary=summary,
         )
@@ -181,6 +218,193 @@ class Jsic39CollectionTest(unittest.TestCase):
         self.assertEqual([item["phone_digits"] for item in payload], ["0312345678", "0120000001"])
         self.assertEqual(rows["1000000000002"]["収集状態"], "processed_no_phone")
         self.assertEqual(rows["1000000000003"]["収集状態"], "website_missing")
+
+    def test_merge_uses_completed_progress_instead_of_manifest_as_processing_proof(self) -> None:
+        manifest = self.root / "manifest.csv"
+        self.write_manifest(manifest, "1000000000001", "1000000000002")
+        progress = self.root / "progress.jsonl"
+        progress.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "corporate_number": "1000000000001",
+                "official_site_url": "https://alpha.example/",
+                "state": "phone_candidate_found",
+                "candidates": [{
+                    "phone": "0312345678",
+                    "candidate_type": "代表電話",
+                    "url": "https://alpha.example/company",
+                    "context": "会社概要 代表電話",
+                    "source": "text",
+                    "score": 0.95,
+                }],
+                "completed_at": "2026-08-24T00:00:00Z",
+            }, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        output = self.root / "output.csv"
+        summary = self.root / "merge.json"
+
+        result = module.merge_batches(
+            all_companies_csv=self.companies,
+            manifests=[str(manifest)],
+            phone_files=[],
+            progress_files=[str(progress)],
+            scope_label="G37-G41",
+            output=output,
+            summary=summary,
+        )
+
+        self.assertEqual(result["targeted_for_phone"], 2)
+        self.assertEqual(result["processed_for_phone"], 1)
+        self.assertEqual(result["scope"], "G37-G41")
+        rows = {row["法人番号"]: row for row in module.read_csv(output)}
+        self.assertEqual(rows["1000000000001"]["収集状態"], "phone_candidate_found")
+        self.assertEqual(rows["1000000000002"]["収集状態"], "website_pending")
+
+    def test_merge_reports_fax_only_separately_from_voice_candidates(self) -> None:
+        manifest = self.root / "manifest.csv"
+        self.write_manifest(manifest, "1000000000001")
+        progress = self.root / "progress.jsonl"
+        progress.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "corporate_number": "1000000000001",
+                "official_site_url": "https://alpha.example/",
+                "state": "fax_only",
+                "candidates": [{
+                    "phone": "0312345678",
+                    "candidate_type": "FAX",
+                    "url": "https://alpha.example/company",
+                    "context": "FAX 03-1234-5678",
+                    "source": "text",
+                    "score": 0.0,
+                }],
+                "completed_at": "2026-08-24T00:00:00Z",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        output = self.root / "output.csv"
+        result = module.merge_batches(
+            all_companies_csv=self.companies,
+            manifests=[str(manifest)],
+            phone_files=[],
+            progress_files=[str(progress)],
+            output=output,
+            summary=self.root / "summary.json",
+        )
+
+        rows = {row["法人番号"]: row for row in module.read_csv(output)}
+        self.assertEqual(rows["1000000000001"]["収集状態"], "fax_only")
+        self.assertEqual(result["fax_only_companies"], 1)
+        self.assertEqual(result["companies_with_voice_candidates"], 0)
+
+    def test_merge_fails_closed_when_requested_progress_artifact_is_missing(self) -> None:
+        manifest = self.root / "manifest.csv"
+        self.write_manifest(manifest, "1000000000001")
+
+        with self.assertRaisesRegex(FileNotFoundError, "progress"):
+            module.merge_batches(
+                all_companies_csv=self.companies,
+                manifests=[str(manifest)],
+                phone_files=[],
+                progress_files=[str(self.root / "missing-progress-*.jsonl")],
+                output=self.root / "output.csv",
+                summary=self.root / "summary.json",
+            )
+
+    def test_merge_requires_progress_unless_legacy_mode_is_explicit(self) -> None:
+        manifest = self.root / "manifest.csv"
+        self.write_manifest(manifest, "1000000000001")
+
+        with self.assertRaisesRegex(ValueError, "progress.*required"):
+            module.merge_batches(
+                all_companies_csv=self.companies,
+                manifests=[str(manifest)],
+                phone_files=[],
+                output=self.root / "output.csv",
+                summary=self.root / "summary.json",
+            )
+
+    def test_merge_rejects_progress_from_another_dataset_generation(self) -> None:
+        manifest = self.root / "manifest.csv"
+        self.write_manifest(manifest, "1000000000001")
+        progress = self.root / "progress.jsonl"
+        progress.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "corporate_number": "1000000000001",
+                "official_site_url": "https://alpha.example/",
+                "dataset_generation": "stale-generation",
+                "state": "processed_no_phone",
+                "candidates": [],
+                "completed_at": "2026-08-24T00:00:00Z",
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "dataset_generation mismatch"):
+            module.merge_batches(
+                all_companies_csv=self.companies,
+                manifests=[str(manifest)],
+                phone_files=[],
+                progress_files=[str(progress)],
+                output=self.root / "output.csv",
+                summary=self.root / "summary.json",
+            )
+
+    def test_merge_rejects_nonterminal_progress_state(self) -> None:
+        manifest = self.root / "manifest.csv"
+        self.write_manifest(manifest, "1000000000001")
+        progress = self.root / "progress.jsonl"
+        progress.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "corporate_number": "1000000000001",
+                "official_site_url": "https://alpha.example/",
+                "state": "started",
+                "candidates": [],
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "invalid corporate_number/state"):
+            module.merge_batches(
+                all_companies_csv=self.companies,
+                manifests=[str(manifest)],
+                phone_files=[],
+                progress_files=[str(progress)],
+                output=self.root / "output.csv",
+                summary=self.root / "summary.json",
+            )
+
+    def test_merge_rejects_invalid_progress_phone(self) -> None:
+        manifest = self.root / "manifest.csv"
+        self.write_manifest(manifest, "1000000000001")
+        progress = self.root / "progress.jsonl"
+        progress.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "corporate_number": "1000000000001",
+                "official_site_url": "https://alpha.example/",
+                "state": "phone_candidate_found",
+                "candidates": [{
+                    "phone": "1",
+                    "candidate_type": "代表電話",
+                    "url": "https://alpha.example/company",
+                }],
+            }, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "phone candidate is invalid"):
+            module.merge_batches(
+                all_companies_csv=self.companies,
+                manifests=[str(manifest)],
+                phone_files=[],
+                progress_files=[str(progress)],
+                output=self.root / "output.csv",
+                summary=self.root / "summary.json",
+            )
 
 
 if __name__ == "__main__":
