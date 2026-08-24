@@ -1,0 +1,211 @@
+name: G37-G41 official contact collection
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release containing phone_targets_g37_41.csv
+        required: false
+        default: "v0.10.0"
+      start_offset:
+        description: Start position within prioritized pending official sites
+        required: false
+        default: "0"
+      batch_size:
+        description: Companies per shard (8 shards; default total 1,000)
+        required: false
+        default: "125"
+      max_pages:
+        description: Maximum same-host pages per company
+        required: false
+        default: "4"
+      prior_run_id:
+        description: Optional prior run ID with matching g-contact-shard-* artifacts
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: g-contact-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  RELEASE_TAG: ${{ github.event.inputs.release_tag || 'v0.10.0' }}
+  START_OFFSET: ${{ github.event.inputs.start_offset || '0' }}
+  BATCH_SIZE: ${{ github.event.inputs.batch_size || '125' }}
+  MAX_PAGES: ${{ github.event.inputs.max_pages || '4' }}
+  PRIOR_RUN_ID: ${{ github.event.inputs.prior_run_id || '' }}
+
+jobs:
+  download-g-targets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Download reviewed G target ledger from Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || {
+            echo "Invalid release_tag." >&2
+            exit 1
+          }
+          mkdir -p collection
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern phone_targets_g37_41.csv \
+            --pattern queria_runtime_g_fuma.duckdb \
+            --dir collection
+          test -s collection/phone_targets_g37_41.csv
+          test -s collection/queria_runtime_g_fuma.duckdb
+      - name: Restore company names and priority fields from the same Release generation
+        run: |
+          set -euo pipefail
+          python -m pip install "duckdb>=1.5.5,<2"
+          python scripts/enrich_g_contact_targets.py \
+            --targets collection/phone_targets_g37_41.csv \
+            --database collection/queria_runtime_g_fuma.duckdb \
+            --output collection/phone_targets_g37_41_enriched.csv \
+            --require-complete
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g-contact-targets
+          path: collection/phone_targets_g37_41_enriched.csv
+          if-no-files-found: error
+          retention-days: 90
+
+  crawl-known-official-sites:
+    needs: download-g-targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install crawler dependencies
+        working-directory: company_scout/public_enrichment
+        run: python -m pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: g-contact-targets
+          path: collection
+      - name: Prepare shard, restore matching progress, and crawl
+        shell: bash
+        working-directory: company_scout/public_enrichment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          [[ "$START_OFFSET" =~ ^[0-9]+$ ]]
+          [[ "$BATCH_SIZE" =~ ^[0-9]+$ ]]
+          [[ "$MAX_PAGES" =~ ^[0-9]+$ ]]
+          (( BATCH_SIZE >= 1 && BATCH_SIZE <= 500 ))
+          (( MAX_PAGES >= 1 && MAX_PAGES <= 10 ))
+          if [[ -n "$PRIOR_RUN_ID" ]]; then
+            [[ "$PRIOR_RUN_ID" =~ ^[0-9]+$ ]] || {
+              echo "Invalid prior_run_id." >&2
+              exit 1
+            }
+          fi
+          OFFSET=$((START_OFFSET + SHARD * BATCH_SIZE))
+          WORK="work/shard-${SHARD}"
+          mkdir -p "$WORK"
+          python jsic_g37_41_collection.py \
+            --targets ../../collection/phone_targets_g37_41_enriched.csv \
+            --database "$WORK/targets.sqlite3" \
+            --manifest "$WORK/manifest.csv" \
+            --summary "$WORK/prepare_summary.json" \
+            --offset "$OFFSET" \
+            --limit "$BATCH_SIZE"
+
+          if [[ -n "$PRIOR_RUN_ID" ]]; then
+            mkdir -p "$WORK/prior"
+            gh run download "$PRIOR_RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "g-contact-shard-${SHARD}" \
+              --dir "$WORK/prior"
+            test -s "$WORK/prior/manifest.csv"
+            test -s "$WORK/prior/progress.jsonl"
+            cmp --silent "$WORK/prior/manifest.csv" "$WORK/manifest.csv" || {
+              echo "Prior progress manifest does not match this shard." >&2
+              exit 1
+            }
+            cp "$WORK/prior/progress.jsonl" "$WORK/progress.jsonl"
+          fi
+
+          python official_site_phone_enricher.py \
+            --db "$WORK/targets.sqlite3" \
+            --output "$WORK/phones.csv" \
+            --progress "$WORK/progress.jsonl" \
+            --summary "$WORK/collection_summary.json" \
+            --max-pages "$MAX_PAGES" \
+            --max-candidates 5 \
+            --sleep 0.75 \
+            --timeout 20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g-contact-shard-${{ matrix.shard }}
+          path: |
+            company_scout/public_enrichment/work/shard-${{ matrix.shard }}/manifest.csv
+            company_scout/public_enrichment/work/shard-${{ matrix.shard }}/progress.jsonl
+            company_scout/public_enrichment/work/shard-${{ matrix.shard }}/phones.csv
+            company_scout/public_enrichment/work/shard-${{ matrix.shard }}/prepare_summary.json
+            company_scout/public_enrichment/work/shard-${{ matrix.shard }}/collection_summary.json
+          if-no-files-found: error
+          retention-days: 90
+
+  merge-g-contact-batch:
+    needs: [download-g-targets, crawl-known-official-sites]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: g-contact-targets
+          path: collection
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: g-contact-shard-*
+          path: batches
+      - name: Merge only completed per-company progress
+        shell: bash
+        working-directory: company_scout/public_enrichment
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          python export_g_contact_targets.py \
+            --targets ../../collection/phone_targets_g37_41_enriched.csv \
+            --output output/g_contact_targets.csv
+          python jsic39_collection.py merge \
+            --all-companies output/g_contact_targets.csv \
+            --manifest '../../batches/**/manifest.csv' \
+            --phones '../../batches/**/phones.csv' \
+            --progress '../../batches/**/progress.jsonl' \
+            --scope-label G37-G41 \
+            --output output/g_public_contacts.csv \
+            --summary output/g_collection_summary.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: g-contact-batch
+          path: company_scout/public_enrichment/output/*
+          if-no-files-found: error
+          retention-days: 90

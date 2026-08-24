@@ -631,6 +631,8 @@ def collect_targets(
     unsupported_retry_states = retry_states.difference(TERMINAL_STATES)
     if unsupported_retry_states:
         raise ValueError(f"Unsupported retry states: {sorted(unsupported_retry_states)}")
+    progress.parent.mkdir(parents=True, exist_ok=True)
+    progress.touch(exist_ok=True)
     progress_by_company, ignored_tail_lines = load_progress(progress) if resume else ({}, 0)
     if ignored_tail_lines:
         truncate_invalid_progress_tail(progress)

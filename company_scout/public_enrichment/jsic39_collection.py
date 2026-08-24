@@ -246,6 +246,8 @@ def merge_batches(
     manifests: list[str],
     phone_files: list[str],
     progress_files: list[str] | None = None,
+    legacy_manifest_completion: bool = False,
+    scope_label: str = "JSIC39",
     output: Path,
     summary: Path,
 ) -> dict[str, Any]:
@@ -269,8 +271,8 @@ def merge_batches(
     if missing_progress_patterns:
         raise FileNotFoundError(f"Requested progress artifact was not found: {missing_progress_patterns}")
     progress_by_company, progress_paths = _read_progress_jsonl(requested_progress)
-    # Legacy artifacts did not write per-company progress. Preserve their old
-    # interpretation only when no progress artifact was supplied at all.
+    if not progress_paths and not legacy_manifest_completion:
+        raise ValueError("progress artifact is required unless legacy_manifest_completion is explicit")
     processed = set(progress_by_company) if progress_paths else set(targeted)
 
     candidates_by_company: dict[str, dict[str, dict[str, str]]] = {}
@@ -411,6 +413,7 @@ def merge_batches(
     ]
     write_csv(output, fields, output_rows)
     result = {
+        "scope": scope_label,
         "companies": len(all_rows),
         "companies_with_web": website_count,
         "targeted_for_phone": len(targeted),
@@ -423,6 +426,7 @@ def merge_batches(
         "manifest_files": [str(path) for path in manifest_paths],
         "phone_files": [str(path) for path in phone_paths],
         "progress_files": [str(path) for path in progress_paths],
+        "legacy_manifest_completion": legacy_manifest_completion,
         "output": str(output),
     }
     summary.parent.mkdir(parents=True, exist_ok=True)
@@ -448,6 +452,12 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--manifest", action="append", default=[], required=True)
     merge.add_argument("--phones", action="append", default=[], required=True)
     merge.add_argument("--progress", action="append", default=[])
+    merge.add_argument(
+        "--legacy-manifest-completion",
+        action="store_true",
+        help="旧成果物のみ: manifestを処理済み証拠として扱う",
+    )
+    merge.add_argument("--scope-label", default="JSIC39")
     merge.add_argument("--output", type=Path, required=True)
     merge.add_argument("--summary", type=Path, required=True)
     return parser
@@ -471,6 +481,8 @@ def main() -> int:
             manifests=args.manifest,
             phone_files=args.phones,
             progress_files=args.progress,
+            legacy_manifest_completion=args.legacy_manifest_completion,
+            scope_label=args.scope_label,
             output=args.output,
             summary=args.summary,
         )

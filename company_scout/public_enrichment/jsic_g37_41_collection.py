@@ -21,9 +21,12 @@ from jsic39_collection import prepare_shard
 def make_target_csv(source: Path) -> Path:
     handle = tempfile.NamedTemporaryFile(prefix="g37_41_targets_", suffix=".csv", delete=False, mode="w", encoding="utf-8-sig", newline="")
     path = Path(handle.name)
-    with handle:
-        reader = csv.DictReader(source.open("r", encoding="utf-8-sig", newline=""))
-        writer = csv.DictWriter(handle, fieldnames=["corporate_number", "company_name", "prefecture_name", "city_name", "employee_number", "capital_stock", "company_url"])
+    with handle, source.open("r", encoding="utf-8-sig", newline="") as source_handle:
+        reader = csv.DictReader(source_handle)
+        writer = csv.DictWriter(handle, fieldnames=[
+            "corporate_number", "company_name", "prefecture_name", "city_name",
+            "jsic_major_codes", "jsic_middle_codes", "employee_number", "capital_stock", "company_url",
+        ])
         writer.writeheader()
         for row in reader:
             corporate_number = (row.get("corporate_number") or "").strip()
@@ -40,6 +43,8 @@ def make_target_csv(source: Path) -> Path:
                     "company_name": row.get("company_name") or row.get("entity_key") or corporate_number,
                     "prefecture_name": row.get("prefecture_name") or "",
                     "city_name": row.get("city_name") or "",
+                    "jsic_major_codes": "G",
+                    "jsic_middle_codes": "",
                     "employee_number": row.get("employee_number") or "",
                     "capital_stock": row.get("capital_stock") or "",
                     "company_url": website,

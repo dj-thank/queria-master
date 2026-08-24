@@ -163,6 +163,7 @@ class Jsic39CollectionTest(unittest.TestCase):
             all_companies_csv=self.companies,
             manifests=[str(manifest)],
             phone_files=[str(phones)],
+            legacy_manifest_completion=True,
             output=output,
             summary=summary,
         )
@@ -215,12 +216,14 @@ class Jsic39CollectionTest(unittest.TestCase):
             manifests=[str(manifest)],
             phone_files=[],
             progress_files=[str(progress)],
+            scope_label="G37-G41",
             output=output,
             summary=summary,
         )
 
         self.assertEqual(result["targeted_for_phone"], 2)
         self.assertEqual(result["processed_for_phone"], 1)
+        self.assertEqual(result["scope"], "G37-G41")
         rows = {row["法人番号"]: row for row in module.read_csv(output)}
         self.assertEqual(rows["1000000000001"]["収集状態"], "phone_candidate_found")
         self.assertEqual(rows["1000000000002"]["収集状態"], "website_pending")
@@ -271,6 +274,19 @@ class Jsic39CollectionTest(unittest.TestCase):
                 manifests=[str(manifest)],
                 phone_files=[],
                 progress_files=[str(self.root / "missing-progress-*.jsonl")],
+                output=self.root / "output.csv",
+                summary=self.root / "summary.json",
+            )
+
+    def test_merge_requires_progress_unless_legacy_mode_is_explicit(self) -> None:
+        manifest = self.root / "manifest.csv"
+        module.write_csv(manifest, ["法人番号"], [{"法人番号": "1000000000001"}])
+
+        with self.assertRaisesRegex(ValueError, "progress.*required"):
+            module.merge_batches(
+                all_companies_csv=self.companies,
+                manifests=[str(manifest)],
+                phone_files=[],
                 output=self.root / "output.csv",
                 summary=self.root / "summary.json",
             )

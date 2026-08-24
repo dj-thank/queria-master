@@ -14,6 +14,29 @@ import official_site_phone_enricher as phone
 
 
 class PhoneProgressTests(unittest.TestCase):
+    def test_empty_shard_still_emits_resume_and_output_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / "phones.csv"
+            progress = root / "progress.jsonl"
+
+            result = phone.collect_targets(
+                [],
+                session=object(),
+                output=output,
+                progress=progress,
+                max_pages=4,
+                max_candidates=5,
+                timeout=20,
+                sleep_s=0,
+                resume=True,
+            )
+
+            self.assertEqual(result["targets"], 0)
+            self.assertTrue(progress.is_file())
+            self.assertEqual(progress.read_text(encoding="utf-8"), "")
+            self.assertTrue(output.is_file())
+
     def test_collection_progress_is_resumable_and_is_the_candidate_source_of_truth(self) -> None:
         targets = [
             {

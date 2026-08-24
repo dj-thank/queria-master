@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import jsic_g37_41_collection as collection
+import export_g_contact_targets as exporter
 
 
 class G3741CollectionTests(unittest.TestCase):
@@ -46,6 +47,13 @@ class G3741CollectionTests(unittest.TestCase):
             self.assertEqual(rows[0]["company_name"], "優先株式会社")
             self.assertEqual(rows[0]["employee_number"], "120")
             self.assertEqual(rows[0]["capital_stock"], "50000000")
+            self.assertEqual(rows[0]["jsic_major_codes"], "G")
+
+            exported = Path(temp) / "exported.csv"
+            result = exporter.export_targets(source, exported)
+            self.assertEqual(result["scope"], "G37-G41")
+            self.assertEqual(result["rows"], 1)
+            self.assertTrue(exported.is_file())
 
 
 if __name__ == "__main__":
