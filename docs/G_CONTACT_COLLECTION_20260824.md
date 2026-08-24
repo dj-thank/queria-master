@@ -68,6 +68,8 @@
 - SI、受託開発、運用保守
 - 採用、同一ホストのお問い合わせフォーム
 
-merge時に `schemas/it-subsidiary-ses-priority-v1.schema.json` で全行を検証し、`g_ses_priority_profiles.jsonl` を正本として、営業確認用CSVと集計JSONを一方向生成する。電話は公式サイト由来でも `candidate_needs_review` のまま、FAXは除外、親会社名が抽出できないグループ文言はcandidate、欠落はunknownである。`promotion_authorized` は常にfalseで、自動確認済み昇格は行わない。
+merge時に `schemas/it-subsidiary-ses-priority-v1.schema.json` で全行を検証し、`g_ses_priority_profiles.jsonl` を正本として、営業確認用CSVと集計JSONを一方向生成する。電話は公式サイト由来でも `candidate_needs_review` のまま、FAXは営業電話・voice成功から除外し監査用の `excluded` 行としてだけ保持する。親会社名が抽出できないグループ文言はcandidate、欠落はunknownである。`promotion_authorized` は常にfalseで、自動確認済み昇格は行わない。
 
 旧schema v1のprogressはprofile未確認として扱う。`--retry-missing-profile` により旧行だけを再取得でき、同一manifestのv2進捗は通常どおり再開する。最終batch内のプロフィール4ファイルも暗号化され、受信者暗号化exportだけが1日保持の復号可能経路になる。
+
+Luna evidence laneとRunnerの役割、packet契約、root受入条件は [`LUNA_SES_EVIDENCE_WORKFLOW_JA.md`](LUNA_SES_EVIDENCE_WORKFLOW_JA.md) に分離した。

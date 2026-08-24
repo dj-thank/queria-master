@@ -78,7 +78,7 @@ def test_export_builds_schema_valid_candidate_only_priority_records(tmp_path: Pa
     write_targets(targets)
     page_profile = business_profile.extract_business_profile_evidence(
         "https://beta.example/company",
-        "完全子会社の情報システム子会社としてSES、客先常駐、受託開発、運用保守を提供",
+        "株主：親会社株式会社（100％）。完全子会社の情報システム子会社としてSES、客先常駐、受託開発、運用保守を提供",
         [("/contact", "お問い合わせ")],
         observed_at="2026-08-25T00:00:00+00:00",
     )
@@ -123,6 +123,7 @@ def test_export_builds_schema_valid_candidate_only_priority_records(tmp_path: Pa
     phone_item = next(item for item in records[0]["contact_evidence"] if item["channel"] == "phone")
     assert phone_item["review_status"] == "candidate_needs_review"
     assert records[0]["parent_company"]["status"] == "candidate"
+    assert records[0]["parent_company"]["name"] is not None
     assert records[-1]["official_site"]["canonicality"] == "missing"
     _fields, csv_rows = priority.read_csv(csv_output)
     assert csv_rows[0]["priority_tier"] == "A"

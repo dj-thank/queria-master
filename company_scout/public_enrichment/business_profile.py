@@ -77,6 +77,16 @@ SIGNAL_PATTERNS: dict[str, tuple[str, ...]] = {
 
 PROFILE_DIMENSIONS = tuple((*SIGNAL_PATTERNS.keys(), "contact_form"))
 CONTACT_LINK_HINTS = ("contact", "inquiry", "お問い合わせ", "お問合せ", "ご相談")
+PARENT_NAME_PATTERNS = (
+    re.compile(
+        r"(?:親会社|株主(?:構成)?)\s*(?:は|[:：])?\s*"
+        r"(?P<name>(?:株式会社|合同会社)?[^|。\n]{1,60}?(?:株式会社|合同会社))"
+    ),
+    re.compile(
+        r"(?P<name>(?:株式会社|合同会社)?[^|。\n]{1,50}?(?:株式会社|合同会社))\s*"
+        r"(?:より)?(?:100|１００)[%％](?:出資)?"
+    ),
+)
 
 
 def now_iso() -> str:
@@ -108,8 +118,34 @@ def empty_business_profile() -> dict[str, Any]:
     return {
         "schema_version": PROFILE_SCHEMA_VERSION,
         "facts": [],
+        "parent_company_candidates": [],
         "unknowns": list(PROFILE_DIMENSIONS),
     }
+
+
+def _parent_company_candidates(
+    url: str,
+    text: str,
+    observed_at: str,
+    max_excerpt_chars: int,
+) -> list[dict[str, Any]]:
+    candidates: dict[tuple[str, str], dict[str, Any]] = {}
+    for pattern in PARENT_NAME_PATTERNS:
+        for match in pattern.finditer(text):
+            name = clean_text(match.group("name")).strip("：:、,（）() ")
+            if not 3 <= len(name) <= 80 or not re.search(r"(?:株式会社|合同会社)", name):
+                continue
+            excerpt = _excerpt(text, match.start(), match.end(), max_excerpt_chars)
+            item = {
+                "name": name,
+                "status": "observed_text_needs_review",
+                "evidence_url": url,
+                "excerpt": excerpt,
+                "excerpt_sha256": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+                "observed_at": observed_at,
+            }
+            candidates[(name, url)] = item
+    return [candidates[key] for key in sorted(candidates)]
 
 
 def extract_business_profile_evidence(
@@ -159,12 +195,16 @@ def extract_business_profile_evidence(
     return {
         "schema_version": PROFILE_SCHEMA_VERSION,
         "facts": facts,
+        "parent_company_candidates": _parent_company_candidates(
+            url, text, observed_at, max_excerpt_chars
+        ),
         "unknowns": [dimension for dimension in PROFILE_DIMENSIONS if dimension not in present],
     }
 
 
 def merge_business_profiles(profiles: Iterable[dict[str, Any]]) -> dict[str, Any]:
     facts: dict[tuple[str, str, str], dict[str, Any]] = {}
+    parent_candidates: dict[tuple[str, str], dict[str, Any]] = {}
     for profile in profiles:
         for fact in profile.get("facts") or []:
             key = (
@@ -174,11 +214,19 @@ def merge_business_profiles(profiles: Iterable[dict[str, Any]]) -> dict[str, Any
             )
             if all(key):
                 facts[key] = dict(fact)
+        for candidate in profile.get("parent_company_candidates") or []:
+            key = (
+                str(candidate.get("name") or ""),
+                str(candidate.get("evidence_url") or ""),
+            )
+            if all(key):
+                parent_candidates[key] = dict(candidate)
     ordered = [facts[key] for key in sorted(facts)]
     present = {str(item["signal"]) for item in ordered}
     return {
         "schema_version": PROFILE_SCHEMA_VERSION,
         "facts": ordered,
+        "parent_company_candidates": [parent_candidates[key] for key in sorted(parent_candidates)],
         "unknowns": [dimension for dimension in PROFILE_DIMENSIONS if dimension not in present],
     }
 
@@ -196,6 +244,16 @@ def validate_profile_evidence_host(profile: dict[str, Any], official_site_url: s
         if not re.fullmatch(r"[a-f0-9]{64}", str(fact.get("excerpt_sha256") or "")):
             return False
         if len(str(fact.get("excerpt") or "")) > MAX_EXCERPT_CHARS:
+            return False
+    for candidate in profile.get("parent_company_candidates") or []:
+        evidence_host = (
+            urlparse(str(candidate.get("evidence_url") or "")).hostname or ""
+        ).lower().removeprefix("www.")
+        if evidence_host != official_host:
+            return False
+        if not re.fullmatch(r"[a-f0-9]{64}", str(candidate.get("excerpt_sha256") or "")):
+            return False
+        if not clean_text(candidate.get("name")):
             return False
     return True
 

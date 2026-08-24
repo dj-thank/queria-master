@@ -280,6 +280,8 @@ def _record_from_target(row: dict[str, str], progress: dict[str, Any] | None) ->
     contacts.sort(key=lambda item: (item["channel"], item["type"], item["value"] or "", item["evidence_url"]))
 
     parent_facts = [item for item in facts if item["signal"] == "parent_group"]
+    parent_candidates = [dict(item) for item in profile.get("parent_company_candidates") or []]
+    unique_parent_names = sorted({clean(item.get("name")) for item in parent_candidates if clean(item.get("name"))})
     business = [
         {
             "signal": fact["signal"] if fact["signal"] in BUSINESS_SIGNAL_STRENGTH else "other",
@@ -294,7 +296,8 @@ def _record_from_target(row: dict[str, str], progress: dict[str, Any] | None) ->
     business.sort(key=lambda item: (item["signal"], item["evidence_url"], item["excerpt"]))
     unknowns = set(str(item) for item in profile.get("unknowns") or [])
     if parent_facts:
-        unknowns.add("parent_company_name_requires_review")
+        if len(unique_parent_names) != 1:
+            unknowns.add("parent_company_name_requires_review")
     else:
         unknowns.add("parent_company_relationship")
     if not contacts:
@@ -326,7 +329,7 @@ def _record_from_target(row: dict[str, str], progress: dict[str, Any] | None) ->
             "evidence": facts,
         },
         "parent_company": {
-            "name": None,
+            "name": unique_parent_names[0] if len(unique_parent_names) == 1 else None,
             "status": "candidate" if parent_facts else "unknown",
             "evidence": parent_facts,
         },

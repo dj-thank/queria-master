@@ -53,6 +53,22 @@ def test_unknowns_are_explicit_and_missing_is_not_false() -> None:
     assert set(result["unknowns"]) == set(profile.PROFILE_DIMENSIONS)
 
 
+def test_parent_company_name_is_only_a_review_candidate_from_explicit_wording() -> None:
+    result = profile.extract_business_profile_evidence(
+        "https://alpha.example/company",
+        "会社概要 株主：SCSK株式会社（100％） 事業内容 受託開発",
+        observed_at="2026-08-25T00:00:00+00:00",
+    )
+    assert result["parent_company_candidates"] == [{
+        "name": "SCSK株式会社",
+        "status": "observed_text_needs_review",
+        "evidence_url": "https://alpha.example/company",
+        "excerpt": result["parent_company_candidates"][0]["excerpt"],
+        "excerpt_sha256": result["parent_company_candidates"][0]["excerpt_sha256"],
+        "observed_at": "2026-08-25T00:00:00+00:00",
+    }]
+
+
 def test_profile_merge_is_deterministic_and_deduplicates() -> None:
     page = profile.extract_business_profile_evidence(
         "https://alpha.example/about",
