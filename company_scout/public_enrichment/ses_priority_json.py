@@ -316,12 +316,13 @@ def validate_progress_export_binding(
 
 
 def _evidence_copy(fact: dict[str, Any]) -> dict[str, Any]:
+    excerpt = clean(fact.get("excerpt"))[:240]
     return {
         "signal": clean(fact.get("signal")),
         "status": "observed_text",
         "evidence_url": normalize_url(fact.get("evidence_url")),
-        "excerpt": clean(fact.get("excerpt"))[:240],
-        "excerpt_sha256": clean(fact.get("excerpt_sha256")),
+        "excerpt": excerpt,
+        "excerpt_sha256": hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
         "observed_at": clean(fact.get("observed_at")) or now_iso(),
     }
 
