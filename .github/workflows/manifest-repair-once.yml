@@ -1,0 +1,49 @@
+name: One-shot release manifest repair
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - .github/workflows/manifest-repair-once.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: manifest-repair-once
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: github.repository == 'dj-thank/queria-master' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: develop
+          fetch-depth: 1
+
+      - name: Remove executor from final tree and regenerate manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/manifest-repair-once.yml
+          python scripts/generate_manifest.py
+          python scripts/generate_manifest.py --check
+          python scripts/verify_package.py
+          git diff --check
+
+      - name: Commit the deterministic manifest repair
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add MANIFEST.sha256 .github/workflows/manifest-repair-once.yml
+          git diff --cached --quiet && { echo "No repair required"; exit 0; }
+          git commit -m "fix: regenerate deterministic release manifest"
+          git push origin HEAD:develop
