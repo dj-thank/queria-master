@@ -39,4 +39,5 @@ jobs:
         env:
           G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
         shell: bash
+        # Re-run after the apply script was reduced to commit only validated non-workflow changes.
         run: bash scripts/apply_contact_coverage_v3_once.sh
