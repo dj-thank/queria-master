@@ -1,0 +1,49 @@
+name: Repair information-edition manifest once
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - .github/workflows/repair-information-edition-manifest-once.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repair-information-edition-manifest-once
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: github.repository == 'dj-thank/queria-master' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: develop
+          fetch-depth: 1
+
+      - name: Regenerate manifest from the final indexed edition files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/repair-information-edition-manifest-once.yml
+          python scripts/generate_manifest.py
+          git add MANIFEST.sha256
+          python scripts/generate_manifest.py --check
+          python scripts/verify_package.py
+          git diff --cached --check
+
+      - name: Commit the manifest repair
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git diff --cached --quiet && { echo "No repair required"; exit 0; }
+          git commit -m "fix: regenerate information-edition manifest"
+          git push origin HEAD:develop
