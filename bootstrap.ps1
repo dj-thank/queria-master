@@ -1,6 +1,6 @@
 param(
     [ValidateSet("all-public", "info-communications", "gbizinfo-companies", "all-corporations")]
-    [string]$Scope = "all-public"
+    [string]$Scope = "info-communications"
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,8 +32,9 @@ if ($LASTEXITCODE -ne 0) { throw "pip update failed." }
 if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed." }
 
 $env:QUERIA_NO_TELEMETRY = "1"
-if ((Test-Path "data\queria_master.duckdb") -and (Test-Path "cache\all-public-latest")) {
-    Write-Host "[3/5] Using the bundled full dataset (no re-download)"
+$ScopeCache = Join-Path "cache" ("{0}-latest" -f $Scope)
+if ((Test-Path "data\queria_master.duckdb") -and (Test-Path $ScopeCache)) {
+    Write-Host "[3/5] Using the bundled $Scope dataset (no re-download)"
 } else {
     Write-Host "[3/5] Downloading public Queria data and building DuckDB"
     & $Python -m queria_master refresh --scope $Scope

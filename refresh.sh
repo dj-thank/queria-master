@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-SCOPE="${1:-all-public}"
+SCOPE="${1:-info-communications}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 if [[ ! -x .venv/bin/python ]]; then

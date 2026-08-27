@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCOPE="${1:-all-public}"
+SCOPE="${1:-info-communications}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
@@ -15,8 +15,8 @@ echo "[2/5] Queria CLI と DuckDB をインストール／更新します"
 .venv/bin/python -m pip install --upgrade -r requirements.txt
 
 export QUERIA_NO_TELEMETRY=1
-if [[ -f data/queria_master.duckdb && -d cache/all-public-latest ]]; then
-  echo "[3/5] 同梱済みの全量データを使用します（再ダウンロードしません）"
+if [[ -f data/queria_master.duckdb && -d "cache/${SCOPE}-latest" ]]; then
+  echo "[3/5] 同梱済みの ${SCOPE} データを使用します（再ダウンロードしません）"
 else
   echo "[3/5] Queria 公開データを抽出し、DuckDB を構築します"
   .venv/bin/python -m queria_master refresh --scope "$SCOPE"

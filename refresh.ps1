@@ -1,6 +1,6 @@
 param(
     [ValidateSet("all-public", "info-communications", "gbizinfo-companies", "all-corporations")]
-    [string]$Scope = "all-public"
+    [string]$Scope = "info-communications"
 )
 
 $ErrorActionPreference = "Stop"
