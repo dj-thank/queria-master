@@ -122,7 +122,11 @@ replace_exact(
 replace_exact(
     "company_scout/public_enrichment/official_site_phone_enricher.py",
     "                for chunk in response.iter_content(chunk_size=64 * 1024):\n",
-    "                for chunk in response.iter_content(64 * 1024):\n",
+    "                try:\n"
+    "                    content_iterator = response.iter_content(chunk_size=64 * 1024)\n"
+    "                except TypeError:\n"
+    "                    content_iterator = response.iter_content(64 * 1024)\n"
+    "                for chunk in content_iterator:\n",
 )
 replace_exact(
     "company_scout/public_enrichment/official_site_phone_enricher.py",
@@ -131,7 +135,9 @@ replace_exact(
 )
 
 # Existing tests must reflect the deliberate common-path probing behavior;
-# contact pages are prioritized before company-profile paths.
+# contact pages are prioritized before company-profile paths. The synthetic
+# example domain bypasses DNS only inside the test, preserving runtime SSRF
+# protection unchanged.
 replace_exact(
     "company_scout/public_enrichment/tests/test_phone_security.py",
     "        self.assertEqual(result[\"pages_fetched\"], 1)\n",
@@ -141,4 +147,12 @@ replace_exact(
     "company_scout/public_enrichment/tests/test_structured_contact_extractor.py",
     "    assert rows[0] == \"https://example.jp/company/\"\n",
     "    assert rows[0] == \"https://example.jp/contact/\"\n",
+)
+replace_exact(
+    "company_scout/public_enrichment/tests/test_official_site_phone_deep.py",
+    "    monkeypatch.setattr(phone, \"safe_get_text\", fake_get)\n"
+    "    monkeypatch.setattr(phone.time, \"sleep\", lambda _seconds: None)\n",
+    "    monkeypatch.setattr(phone, \"safe_get_text\", fake_get)\n"
+    "    monkeypatch.setattr(phone, \"is_public_http_url\", lambda _url: True)\n"
+    "    monkeypatch.setattr(phone.time, \"sleep\", lambda _seconds: None)\n",
 )
