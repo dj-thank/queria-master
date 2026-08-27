@@ -26,6 +26,16 @@ if updated != 1:
     raise SystemExit(f"expected one portable README operation, found {updated}")
 module.main()
 
+
+def replace_exact(path: str, old: str, new: str) -> None:
+    target = Path(path)
+    body = target.read_text(encoding="utf-8")
+    count = body.count(old)
+    if count != 1:
+        raise SystemExit(f"{path}: compatibility replacement expected once, found {count}: {old[:100]!r}")
+    target.write_text(body.replace(old, new, 1), encoding="utf-8", newline="\n")
+
+
 # The reviewed contact file is wider than the previous crawl universe. A row
 # absent from that universe is audited as unmatched rather than blocking every
 # recovered candidate. Multiple matches remain a hard failure.
@@ -102,3 +112,33 @@ for old, new in replacements:
         raise SystemExit(f"importer compatibility replacement expected once, found {count}: {old[:80]!r}")
     text = text.replace(old, new, 1)
 importer.write_text(text, encoding="utf-8", newline="\n")
+
+# Deep discovery compatibility and intended probing semantics.
+replace_exact(
+    "company_scout/public_enrichment/official_site_discovery.py",
+    "            current = phone.canonical_url(queue.pop(0))\n",
+    "            current = phone.canonical_url(candidate_url, queue.pop(0))\n",
+)
+replace_exact(
+    "company_scout/public_enrichment/official_site_phone_enricher.py",
+    "                for chunk in response.iter_content(chunk_size=64 * 1024):\n",
+    "                for chunk in response.iter_content(64 * 1024):\n",
+)
+replace_exact(
+    "company_scout/public_enrichment/official_site_phone_enricher.py",
+    "    queue = [website]\n",
+    "    queue = [website, *common_contact_urls(website)]\n",
+)
+
+# Existing tests must reflect the deliberate common-path probing behavior;
+# contact pages are prioritized before company-profile paths.
+replace_exact(
+    "company_scout/public_enrichment/tests/test_phone_security.py",
+    "        self.assertEqual(result[\"pages_fetched\"], 1)\n",
+    "        self.assertEqual(result[\"pages_fetched\"], 4)\n",
+)
+replace_exact(
+    "company_scout/public_enrichment/tests/test_structured_contact_extractor.py",
+    "    assert rows[0] == \"https://example.jp/company/\"\n",
+    "    assert rows[0] == \"https://example.jp/contact/\"\n",
+)
