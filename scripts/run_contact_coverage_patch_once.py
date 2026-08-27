@@ -116,8 +116,8 @@ importer.write_text(text, encoding="utf-8", newline="\n")
 # Deep discovery compatibility and intended probing semantics.
 replace_exact(
     "company_scout/public_enrichment/official_site_discovery.py",
-    "            current = phone.canonical_url(queue.pop(0))\n",
-    "            current = phone.canonical_url(candidate_url, queue.pop(0))\n",
+    "        current = phone.canonical_url(queue.pop(0))\n",
+    "        current = phone.canonical_url(candidate_url, queue.pop(0))\n",
 )
 replace_exact(
     "company_scout/public_enrichment/official_site_phone_enricher.py",
