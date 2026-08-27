@@ -32,7 +32,19 @@ jobs:
       - name: Reconstruct the staged implementation bundle
         run: |
           set -euo pipefail
-          cat .patch_payload/contact_coverage_bundle.b64.part* > /tmp/contact-coverage.b64
+          cat \
+            .patch_payload/contact_coverage_bundle.b64.part00 \
+            .patch_payload/contact_coverage_bundle.b64.part01 \
+            .patch_payload/contact_coverage_bundle.b64.part02 \
+            .patch_payload/contact_coverage_bundle.b64.part03 \
+            .patch_payload/contact_coverage_bundle.b64.part04 \
+            .patch_payload/contact_coverage_bundle.b64.part05a \
+            .patch_payload/contact_coverage_bundle.b64.part05b \
+            .patch_payload/contact_coverage_bundle.b64.part05c \
+            .patch_payload/contact_coverage_bundle.b64.part05d \
+            .patch_payload/contact_coverage_bundle.b64.part06 \
+            .patch_payload/contact_coverage_bundle.b64.part07 \
+            > /tmp/contact-coverage.b64
           base64 --decode /tmp/contact-coverage.b64 > /tmp/contact-coverage.tar.gz
           echo "1f259a403e9f39f2b00e772e34d42ad1d5722a45d40c19e33b6b2b797633045e  /tmp/contact-coverage.tar.gz" | sha256sum --check -
           tar -xzf /tmp/contact-coverage.tar.gz -C .
