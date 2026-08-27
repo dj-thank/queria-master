@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add MANIFEST.sha256 .github/workflows/manifest-repair-once.yml
+          git add MANIFEST.sha256
           git diff --cached --quiet && { echo "No repair required"; exit 0; }
           git commit -m "fix: regenerate deterministic release manifest"
           git push origin HEAD:develop
