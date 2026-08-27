@@ -1,0 +1,168 @@
+name: Apply information-communications contact coverage once
+
+on:
+  push:
+    branches:
+      - feat/info-communications-contact-coverage
+    paths:
+      - .github/workflows/apply-contact-coverage-once.yml
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: apply-information-communications-contact-coverage-once
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.repository == 'dj-thank/queria-master' && github.ref == 'refs/heads/feat/info-communications-contact-coverage'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: feat/info-communications-contact-coverage
+          fetch-depth: 1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+
+      - name: Reconstruct the staged implementation bundle
+        run: |
+          set -euo pipefail
+          cat .patch_payload/contact_coverage_bundle.b64.part* > /tmp/contact-coverage.b64
+          base64 --decode /tmp/contact-coverage.b64 > /tmp/contact-coverage.tar.gz
+          echo "1f259a403e9f39f2b00e772e34d42ad1d5722a45d40c19e33b6b2b797633045e  /tmp/contact-coverage.tar.gz" | sha256sum --check -
+          tar -xzf /tmp/contact-coverage.tar.gz -C .
+
+      - name: Apply source, workflow, tests, and documentation patch
+        run: |
+          set -euo pipefail
+          python scripts/apply_contact_coverage_patch_once.py
+          python -m py_compile \
+            company_scout/public_enrichment/structured_contact_extractor.py \
+            company_scout/public_enrichment/official_site_discovery.py \
+            company_scout/public_enrichment/official_site_phone_enricher.py \
+            scripts/import_g_contact_artifact.py \
+            scripts/g_contact_seed.py \
+            scripts/enrich_g_contact_targets.py \
+            scripts/build_g37_41_fuma.py
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: g-contact-batch
+          path: inbound
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: "32759320358"
+
+      - name: Recover the completed crawl into the public G contact seed
+        env:
+          G_CONTACT_ARTIFACT_KEY: ${{ secrets.G_CONTACT_ARTIFACT_KEY }}
+          SOURCE_RUN_ID: "32759320358"
+        run: |
+          set -euo pipefail
+          (( ${#G_CONTACT_ARTIFACT_KEY} >= 32 ))
+          umask 077
+          test -s inbound/g-contact-batch.tar.gz.enc
+          mkdir -p plaintext
+          openssl enc -d -aes-256-cbc -pbkdf2 \
+            -pass env:G_CONTACT_ARTIFACT_KEY \
+            -in inbound/g-contact-batch.tar.gz.enc |
+            tar -C plaintext -xzf -
+          test -s plaintext/g_public_contacts.csv
+          test -s plaintext/g_collection_summary.json
+
+          OUTPUT_DIR="data/info_communications_contacts"
+          rm -rf "$OUTPUT_DIR/parts"
+          mkdir -p "$OUTPUT_DIR/parts"
+          python scripts/import_g_contact_artifact.py \
+            --contacts plaintext/g_public_contacts.csv \
+            --manual "$OUTPUT_DIR/manual_verified_official_contacts_20260821.csv" \
+            --output "$OUTPUT_DIR/official_contact_candidates.csv" \
+            --zip-dir "$OUTPUT_DIR/parts" \
+            --summary "$OUTPUT_DIR/collection_summary.json" \
+            --source-run-id "$SOURCE_RUN_ID"
+          rm -rf plaintext inbound
+
+      - name: Install test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install \
+            -r company_scout/public_enrichment/requirements.txt \
+            "pytest>=8,<10" \
+            "duckdb>=1.5.5,<2" \
+            "openpyxl>=3.1,<4"
+
+      - name: Validate collection, discovery, import, and build integration
+        run: |
+          set -euo pipefail
+          python -m pytest company_scout/public_enrichment/tests -q
+          python -m pytest tests/test_g_contact_target_enrichment.py -q
+          python - <<'PY'
+          import csv
+          import json
+          import zipfile
+          from pathlib import Path
+
+          root = Path("data/info_communications_contacts")
+          seed = root / "official_contact_candidates.csv"
+          summary = json.loads((root / "collection_summary.json").read_text(encoding="utf-8"))
+          with seed.open("r", encoding="utf-8-sig", newline="") as handle:
+              reader = csv.DictReader(handle)
+              headers = list(reader.fieldnames or [])
+              rows = list(reader)
+          required = {
+              "corporate_number", "official_website_url", "phone",
+              "phone_type", "evidence_url", "confidence", "source_kind",
+          }
+          if not required.issubset(headers):
+              raise SystemExit(f"public seed is missing fields: {sorted(required.difference(headers))}")
+          forbidden = ("fuma", "nokizal", "source_row_number", "raw_json")
+          if any(token in header.casefold() for header in headers for token in forbidden):
+              raise SystemExit("source-platform-only field leaked into the public seed")
+          if not rows or int(summary.get("contact_candidates") or 0) != len(rows):
+              raise SystemExit("public seed row count does not match its summary")
+          if int(summary.get("companies_with_voice_candidates") or 0) < 1:
+              raise SystemExit("public seed contains no voice-phone companies")
+          zip_paths = sorted((root / "parts").glob("*.zip"))
+          if not zip_paths:
+              raise SystemExit("middle-code ZIP parts were not generated")
+          for path in zip_paths:
+              with zipfile.ZipFile(path) as archive:
+                  if len(archive.namelist()) != 1:
+                      raise SystemExit(f"unexpected ZIP layout: {path}")
+          print(json.dumps({
+              "contact_candidates": len(rows),
+              "companies_with_candidates": summary.get("companies_with_candidates"),
+              "voice_companies": summary.get("companies_with_voice_candidates"),
+              "zip_parts": len(zip_paths),
+          }, ensure_ascii=False))
+          PY
+
+      - name: Remove the one-shot machinery and validate the final tree
+        run: |
+          set -euo pipefail
+          rm -rf .patch_payload
+          rm -f \
+            .github/workflows/apply-contact-coverage-once.yml \
+            scripts/apply_contact_coverage_patch_once.py
+          python scripts/generate_manifest.py
+          python scripts/generate_manifest.py --check
+          python scripts/verify_package.py
+          git diff --check
+
+      - name: Commit the complete information-communications contact expansion
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && {
+            echo "No changes required."
+            exit 0
+          }
+          git commit -m "feat: expand information-communications contact coverage"
+          git push origin HEAD:feat/info-communications-contact-coverage
