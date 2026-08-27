@@ -20,8 +20,8 @@ from typing import Any
 import duckdb
 
 
-PACKAGE_VERSION = "0.10.0"
-GIT_REF = "v0.10.0"
+PACKAGE_VERSION = "0.10.1"
+GIT_REF = "v0.10.1"
 ESTAT_URL = "https://www.e-stat.go.jp/classifications/terms/10/04/G"
 PREFECTURE_RE = re.compile(r"^(北海道|東京都|京都府|大阪府|[東西南北]?[一-龯ぁ-んァ-ヶ]{1,3}県)")
 CITY_RE = re.compile(r"^(.+?市(?:.+?区)?|.+?郡.+?[町村]|.+?[区町村])")

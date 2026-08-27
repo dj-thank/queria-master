@@ -98,7 +98,8 @@ python public_data_enricher.py prepare companies.csv --replace
 XLSX:
 
 ```bash
-python public_data_enricher.py prepare companies.xlsx --sheet 企業DB --replace
+python public_data_enricher.py prepare companies.xlsx --replace
+# 先頭以外のシートを使う場合だけ: --sheet "対象シート名"
 ```
 
 既存DBを作り直す場合だけ `--replace` を使用してください。
@@ -132,6 +133,18 @@ python public_data_enricher.py run-all \
   --input-dir input \
   --output-dir output/csv
 ```
+
+ここまでで生成する `company_public_data.sqlite3` は検証用stagingです。Queriaの検索・CSV・Tauri表示はこのSQLiteを直接読みません。Tauriの「検証して公開」または次のCLIが、`accepted` 行だけを証拠付きenrichmentへ橋渡しし、runtime/indexを同一世代で公開します。
+
+```bash
+python -m queria_master --db data/queria_master.duckdb integrate-public-enrichment \
+  --staging-db company_scout/public_enrichment/output/company_public_data.sqlite3 \
+  --enrichment-db data/queria_enrichment.duckdb \
+  --runtime-db data/queria_runtime.duckdb \
+  --search-index data/search.sqlite
+```
+
+`review` 行は正本へ入りません。公式URL候補は自動確定せず、同一公式hostの根拠を持つ検証済みcontactだけをverified factとして保存します。電話の営業利用可否は初期値`review`です。
 
 ## 法人番号の照合ルール
 

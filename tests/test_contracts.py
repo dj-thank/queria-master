@@ -1,5 +1,7 @@
+import json
 from pathlib import Path
 import re
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -9,11 +11,25 @@ class PackageContractTests(unittest.TestCase):
     def test_required_files_exist(self):
         required = [
             "README.md",
+            "QUICKSTART_JA.md",
             "requirements.txt",
+            "requirements-dev.txt",
             "bootstrap.ps1",
             "bootstrap.sh",
+            "refresh.ps1",
+            "refresh.sh",
             "queria_master/cli.py",
+            "queria_master/gbiz_archive.py",
             "queria_master/pipeline.py",
+            "queria_master/public_enrichment_bridge.py",
+            "queria_master/publish.py",
+            "queria_master/website_discovery.py",
+            "docs/ARCHITECTURE.md",
+            "docs/GBIZ_ARCHIVE_IMPORT_JA.md",
+            "docs/WEBSITE_DISCOVERY_EXTRACTION_ARCHITECTURE_JA.md",
+            "docs/V090_OPERATIONAL_ARCHITECTURE_JA.md",
+            "docs/ZIP_AUDIT_20260824.md",
+            "tests/test_gbiz_archive.py",
             "sql/remote/info_communications.sql",
             "reference/sources.json",
             "queria_master/assets/sql/remote/info_communications.sql",
@@ -40,6 +56,42 @@ class PackageContractTests(unittest.TestCase):
             bundled_files = {path.name: path.read_bytes() for path in bundled_root.glob("*") if path.is_file()}
             self.assertEqual(source_files, bundled_files)
 
+    def test_release_builder_uses_the_verified_file_list(self):
+        from scripts import build_release, verify_package
+
+        self.assertIs(build_release.release_files, verify_package.package_files)
+        relative_paths = {
+            path.relative_to(ROOT).as_posix()
+            for path in verify_package.package_files()
+        }
+        self.assertIn("queria_master/gbiz_archive.py", relative_paths)
+        self.assertIn("queria_master/public_enrichment_bridge.py", relative_paths)
+        self.assertIn("queria_master/publish.py", relative_paths)
+        self.assertIn("queria_master/website_discovery.py", relative_paths)
+        self.assertIn("tests/test_gbiz_archive.py", relative_paths)
+        self.assertIn("docs/GBIZ_ARCHIVE_IMPORT_JA.md", relative_paths)
+        self.assertFalse(
+            any(
+                "node_modules" in path.split("/") or "target" in path.split("/")
+                for path in relative_paths
+            )
+        )
+        self.assertFalse(any(path.startswith("pytest-") for path in relative_paths))
+
+    def test_release_file_list_excludes_untracked_worktree_files(self):
+        from scripts import verify_package
+
+        with tempfile.NamedTemporaryFile(
+            dir=ROOT,
+            prefix="release-untracked-",
+            suffix=".txt",
+        ) as untracked:
+            relative = Path(untracked.name).relative_to(ROOT)
+            self.assertNotIn(
+                relative,
+                {path.relative_to(ROOT) for path in verify_package.package_files()},
+            )
+
     def test_no_embedded_tokens(self):
         token_like = re.compile(
             r"\b(?:qk_|sk-)[A-Za-z0-9_-]{12,}|"
@@ -49,12 +101,12 @@ class PackageContractTests(unittest.TestCase):
         skip = {
             ".git",
             ".venv",
+            "node_modules",
+            "target",
             "__pycache__",
             ".pytest_cache",
             "build",
             "dist",
-            "node_modules",
-            "target",
             "work",
         }
         for path in ROOT.rglob("*"):
@@ -73,6 +125,24 @@ class PackageContractTests(unittest.TestCase):
             ):
                 continue
             text = path.read_text(encoding="utf-8", errors="ignore")
+            if path.name == "package-lock.json":
+                lockfile = json.loads(text)
+
+                def remove_integrity_hashes(value):
+                    if isinstance(value, dict):
+                        return {
+                            key: remove_integrity_hashes(item)
+                            for key, item in value.items()
+                            if key != "integrity"
+                        }
+                    if isinstance(value, list):
+                        return [remove_integrity_hashes(item) for item in value]
+                    return value
+
+                # SRI digests are intentionally high-entropy and otherwise look
+                # exactly like credentials. Keep scanning every other lockfile
+                # value, including resolved URLs and lifecycle metadata.
+                text = json.dumps(remove_integrity_hashes(lockfile), ensure_ascii=False)
             self.assertIsNone(token_like.search(text), str(path.relative_to(ROOT)))
 
 

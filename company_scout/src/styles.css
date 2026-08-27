@@ -1611,6 +1611,52 @@ pre {
   padding-top: 16px;
 }
 
+.enrichment-metrics {
+  margin: 14px 0 0;
+}
+
+.enrichment-controls {
+  display: grid;
+  gap: 9px;
+  margin-top: 12px;
+}
+
+.enrichment-controls > label:not(.check-row) {
+  display: grid;
+  gap: 6px;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.enrichment-controls input:not([type="checkbox"]) {
+  width: 100%;
+  padding: 9px 10px;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.check-row input {
+  margin: 0;
+}
+
+.enrichment-actions {
+  margin-top: 0;
+}
+
+.enrichment-error {
+  display: block;
+  margin-top: 10px;
+  color: #a62f2f;
+  line-height: 1.5;
+}
+
 .sf-form {
   display: grid;
   gap: 10px;

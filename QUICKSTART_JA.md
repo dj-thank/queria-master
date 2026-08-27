@@ -33,6 +33,9 @@ GUIは右上の［設定・診断］から同じ設定を保存できます。�
 
 ```text
 data/queria_master.duckdb
+data/queria_enrichment.duckdb
+data/queria_runtime.duckdb
+data/search.sqlite
 cache/all-public-latest/*.parquet
 exports/
 ```
@@ -55,6 +58,7 @@ exports/
 
 ```powershell
 .\.venv\Scripts\python.exe -m queria_master summary
+```
 
 収録範囲の確認:
 
@@ -75,34 +79,36 @@ exports/
 .\.venv\Scripts\python.exe -m queria_master sql --query "SELECT * FROM core.v_company_source_counts WHERE corporate_number='法人番号13桁' ORDER BY source_key" --max-rows 50
 ```
 
-全量DBを更新した後の検索索引再構築:
-
-```powershell
-.\.venv\Scripts\python.exe -m queria_master build-search-index
-```
-
-営業向け拡張を含め、利用時のDBを一つにまとめる場合:
+全量DBを更新した後は、runtimeと検索索引を同じgenerationで公開します。
 
 ```powershell
 .\.venv\Scripts\python.exe -m queria_master init-enrichment
-.\.venv\Scripts\python.exe -m queria_master seed-enrichment
-.\.venv\Scripts\python.exe -m queria_master build-runtime `
-  --db data\queria_master.duckdb `
+.\.venv\Scripts\python.exe -m queria_master --db data\queria_master.duckdb publish-runtime `
   --enrichment-db data\queria_enrichment.duckdb `
-  --out data\queria_runtime.duckdb
-.\.venv\Scripts\python.exe -m queria_master --db data\queria_runtime.duckdb build-search-index
+  --runtime-db data\queria_runtime.duckdb `
+  --search-index data\search.sqlite
 .\.venv\Scripts\python.exe -m queria_master audit --strict
 ```
 
-以降の高速検索・詳細SQL・リスト作成は `--db data\queria_runtime.duckdb` を指定します。更新時は正規DBと拡張DBを更新してから、`build-runtime` と `build-search-index` を順に実行してください。
+以降の検索・詳細SQL・リスト作成はruntimeを既定で使います。更新時は正規DBと拡張DBを更新してから `publish-runtime` を実行してください。
+
+履歴Hojinjoho活動情報ZIPを正本と分離して監査する任意手順:
+
+```powershell
+.\.venv\Scripts\python.exe -m queria_master import-gbiz-archive `
+  --archive work\Hojinjoho.zip `
+  --staging-db work\hojinjoho-history.duckdb `
+  --target-industry G
+```
+
+このstagingは既存検索へ自動反映されず、既存ファイルも上書きしません。Basic CSVや全法人母集団の取込ではなく、`G` は大分類だけを意味します。自動テストは合成ZIPで実施済みです。別途復元できた companion 監査記録には379,025,154 bytesなどの値がありますが、元ZIP本体は取得できず、現 importer の完走検証は未実施です。詳細は [`docs/GBIZ_ARCHIVE_IMPORT_JA.md`](docs/GBIZ_ARCHIVE_IMPORT_JA.md) を参照してください。
 
 意味検索を追加する場合は、任意依存を入れてから text-rich 法人だけのベクトル索引を作ります。`--candidate-keyword` を併用すると、FTS候補を先に絞るため大規模データでもメモリ効率よく検索できます。
 
 ```powershell
-pip install -e ".[semantic]"
+.\.venv\Scripts\python.exe -m pip install -e ".[semantic]"
 .\.venv\Scripts\python.exe -m queria_master build-semantic-index --model <モデル名>
 .\.venv\Scripts\python.exe -m queria_master semantic-search "ソフトウェア開発を支援する企業" --candidate-keyword ソフトウェア --limit 50
-```
 ```
 
 任意 SQL:

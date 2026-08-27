@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "CompanyMaster-G37-41",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "identifier": "jp.glworkspace.companymaster.g3741",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -33,7 +33,11 @@
       "nsis"
     ],
     "resources": {
-      "resources/bin/codex.exe": "bin/codex.exe"
+      "resources/bin/codex.exe": "bin/codex.exe",
+      "../public_enrichment/public_data_enricher.py": "public_enrichment/public_data_enricher.py",
+      "../public_enrichment/edinet_salary_enricher.py": "public_enrichment/edinet_salary_enricher.py",
+      "../public_enrichment/official_site_phone_enricher.py": "public_enrichment/official_site_phone_enricher.py",
+      "../public_enrichment/requirements.txt": "public_enrichment/requirements.txt"
     },
     "windows": {
       "webviewInstallMode": {

@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "0.10.0",
+  [string]$Version = "0.10.1",
   [string]$Repository = "dj-thank/queria-master",
   [string]$ReleaseDirectory = "releases/CompanyMaster-G37-41",
   [Parameter(Mandatory = $true)]
@@ -13,6 +13,8 @@ $release = (Resolve-Path (Join-Path $root $ReleaseDirectory)).Path
 $auditPath = Join-Path $release "audit.json"
 $audit = Get-Content -Raw -LiteralPath $auditPath | ConvertFrom-Json
 $tag = "v$Version"
+$releaseNoteCode = $Version.Replace(".", "")
+$releaseNotes = Join-Path $root "docs\RELEASE_G_V${releaseNoteCode}_JA.md"
 
 if ($audit.version -ne $Version) {
   throw "audit.version=$($audit.version) does not match requested version $Version"
@@ -71,7 +73,10 @@ if ($publicMetadata -match '(?i)[a-z]:\\users\\|/users/') {
 gh auth status --hostname github.com | Out-Null
 $existing = gh release view $tag --repo $Repository --json tagName 2>$null
 if (-not $existing) {
-  gh release create $tag --repo $Repository --target $Target --title "CompanyMaster 大分類G $tag" --notes-file (Join-Path $root "docs\RELEASE_G_V0100_JA.md")
+  if (-not (Test-Path -LiteralPath $releaseNotes -PathType Leaf)) {
+    throw "Missing release notes: $releaseNotes"
+  }
+  gh release create $tag --repo $Repository --target $Target --title "CompanyMaster 大分類G $tag" --notes-file $releaseNotes
 }
 $assets = @($required) + @($installers)
 gh release upload $tag --repo $Repository --clobber @assets

@@ -1,6 +1,6 @@
 # Queria Master — 全法人・Queria公開データを DuckDB へ
 
-## 0.10: 大分類G情報DB
+## 0.10.1: 大分類G情報DB
 
 大分類G（情報通信業、中分類37〜41）専用版は、FUMA行と全国法人マスタに加え、v0.9.0完全版へ収録済みの厚生労働省公開事業所連絡先を法人番号で結合します。事業所電話は`phone_type=establishment`として本社代表電話から分離し、事業所HPは企業公式HPへ自動昇格せず`enrichment.website_candidates`へ根拠付きで保持します。
 
@@ -62,14 +62,14 @@ chmod +x bootstrap.sh refresh.sh
 ./bootstrap.sh
 ```
 
-初回処理は次を自動実行します。
+初回処理は、同梱済みアーティファクトの有無と現在の状態に応じて、次を必要な場合に自動実行します。
 
 1. `.venv` を作成
 2. Queria CLI と DuckDB をインストール
-3. Queria 上の全法人と、現行スナップショット対象24テーブルを読み取り
+3. 同梱済みcanonical DBとcacheがなければ、Queria 上の全法人と現行スナップショット対象24テーブルを読み取り
 4. 全法人・活動・財務・施設明細を Parquet に抽出
 5. `data/queria_master.duckdb` を原子的に構築
-6. 法人番号・所在地・業種コード・活動明細用のローカルテーブルと検索ビューを作成
+6. 正常なruntime/indexがなければ、enrichmentを初期化し、runtimeと検索索引を同一generationで公開
 
 `GBIZINFO_API_TOKEN` は不要です。Queria は匿名でも読めますが、レート制限に達した場合は次を一度実行してください。
 
@@ -87,10 +87,10 @@ chmod +x bootstrap.sh refresh.sh
 .\.venv\Scripts\python.exe -m queria_master search --keyword AI --prefecture 東京都 --has-web --limit 100
 ```
 
-全量データ付きZIPには `data/search.sqlite`（5,823,039法人分のFTS5 trigram索引）が含まれます。通常のソースZIPや更新後は、次の1回を実行すると同じ高速検索が使えます。
+初回セットアップまたは `publish-runtime` が完了し、`app-health` が成功する場合は `--fast` を利用できます。
 
 ```powershell
-.\.venv\Scripts\python.exe -m queria_master build-search-index
+.\.venv\Scripts\python.exe -m queria_master app-health
 .\.venv\Scripts\python.exe -m queria_master search --keyword ソフトウェア --fast --limit 100
 ```
 
@@ -213,7 +213,72 @@ pip install -e ".[semantic]"
 --fast                 FTS・カテゴリ索引を優先する高速返却
 ```
 
-## データを更新する
+性能値はDB世代、キャッシュ、検索語、ビルド方式で変わるため、READMEへ過去の固定値を基準として置きません。測定方法と実測記録は [`docs/SEARCH_PERFORMANCE.md`](docs/SEARCH_PERFORMANCE.md) を参照してください。
+
+## 公開企業情報の補完 — Public Company Enrichment v1.1.0
+
+`company_scout/public_enrichment/` には、任意の企業CSV / XLSXを政府公開データ・EDINET・企業公式Webサイトで補完する独立パイプラインがあります。
+
+入力元の全列を保持し、法人番号候補、公開値、出典、照合品質、要確認理由をローカルSQLiteへ分離して保存します。このSQLiteは検証用stagingであり、検索画面の正本ではありません。Tauriの「検証して公開」は、確定行だけを `queria_enrichment.duckdb` へ証拠付きで取り込み、runtimeと検索索引を同一`generation_id`で再公開します。
+
+### Windowsで最短実行
+
+`company_scout/public_enrichment/` で次の順に実行します。
+
+```text
+setup_windows.cmd
+prepare_windows.cmd companies.csv
+integrate_windows.cmd
+status_windows.cmd
+```
+
+主な機能:
+
+- CSV / XLSX入力と入力元列の完全保持
+- `SOURCE_ID` がない場合のローカルID自動生成
+- 高確度の法人番号だけを自動採用
+- 高確度候補が競合した場合は採用解除してレビューへ戻す
+- 法人番号確定済み企業だけへ基本・財務・職場情報を結合
+- EDINET XBRLから平均年齢・平均年間給与を抽出
+- 公式サイトの電話番号候補を根拠URL付きで取得
+- SSRF対策、同一ホスト制約、robots.txt、受信サイズ・リダイレクト上限
+- 年度別財務、最新財務、コアキーワード、業種内ランキングの出力
+- 取込元SHA-256、照合状態、要確認理由の監査
+
+詳細は [`company_scout/public_enrichment/README.md`](company_scout/public_enrichment/README.md) と [`company_scout/public_enrichment/SECURITY.md`](company_scout/public_enrichment/SECURITY.md) を参照してください。
+
+## 検証済み公式連絡先
+
+`company_scout/public_enrichment/reference/verified_public_contacts.csv` には、企業自身が管理する公式ページを根拠として確認した連絡先を、次のメタデータとともに保存しています。
+
+- 電話番号
+- 電話種別
+- 電話用途
+- 代表電話フラグ
+- 公式サイトURL
+- 根拠URL
+- 根拠ページ
+- 信頼度
+- 確認日
+
+用途限定番号を代表電話として扱いません。企業名だけの一致も自動採用しません。
+
+任意のローカル企業DBへ反映する場合:
+
+```bash
+cd company_scout/public_enrichment
+python import_verified_contacts.py \
+  --db output/company_public_data.sqlite3 \
+  --contacts reference/verified_public_contacts.csv \
+  --replace-source \
+  --output output/csv/verified_contacts_reflected.csv
+```
+
+照合優先順位は、明示されたローカル `SOURCE_ID`、証券コード＋企業名の一意一致、企業名＋所在地の一意一致です。曖昧なレコードは監査テーブルへ回します。
+
+詳細は [`company_scout/public_enrichment/reference/README.md`](company_scout/public_enrichment/reference/README.md) を参照してください。
+
+## 公開データを更新する
 
 Windows:
 
@@ -227,7 +292,7 @@ Linux / macOS:
 ./refresh.sh
 ```
 
-更新中に既存 DB は触らず、一時 DB が完成して検証を通過した後だけ置き換えます。
+`refresh` コマンド単体はcanonical DBだけを一時DBへ再構築し、検証後に置き換えます。`02_データ更新.bat` / `refresh.ps1` / `refresh.sh` はその後にenrichmentを初期化し、`publish-runtime` でruntimeと検索索引を同一generationとして公開します。
 
 既定の更新対象は `all-public` です。2026-08-19の実データではParquet約6.64GB、DuckDB約28.5GB、
 EDINET財務ファクトだけで約3,906万行あります。初回は空き容量・通信量・処理時間に十分な余裕を持たせてください。
@@ -253,7 +318,24 @@ EDINET財務ファクトだけで約3,906万行あります。初回は空き容
 
 大容量スコープでは数 GB 以上の空き容量と通信量を見込んでください。
 
-## DuckDB の主要テーブル
+### 履歴Hojinjoho ZIPを監査用に読む
+
+過去のgBizINFO Hojinjoho活動情報ZIPはcanonicalへ直接上書きしません。ZIP全体のSHA-256と全memberのpath・metadataをpreflightし、`.json` memberのtop-level array、CRC、各正規化recordを検証して、まだ存在しない明示パスへstaging DuckDBを新規作成します。非JSON memberのpayloadは読み取り・hash記録の対象外です。Basic CSVの取込や全法人母集団の構築を行うコマンドではありません。
+
+```powershell
+.\.venv\Scripts\python.exe -m queria_master import-gbiz-archive `
+  --archive work\Hojinjoho.zip `
+  --staging-db work\hojinjoho-history.duckdb `
+  --target-industry G
+```
+
+`G` は入力の `industry` 文字列配列に大分類コード `G` があるrecordだけを対象にします。`--target-industry ALL` は業種欠損を含む全valid recordを対象にします。入力industry code自体のA〜T妥当性は検証せず、37〜41の中分類も推定しません。出力は `gbiz_archive.import_runs` / `archive_members` / `companies` / `activities` の4表で、source ZIP、各JSON member、各正規化recordのSHA-256と取込条件を残します。既定上限は入力1GiB、ZIP member数256、JSON member数128、1 memberの展開512MiB、展開合計8GiB、圧縮比100倍です。出力先の既存DBとsymlinkは拒否し、同一filesystemでhard linkによるno-clobber公開ができない場合も失敗します。グローバル `--db` は参照も変更もせず、既存検索へ自動反映しません。stagingからcanonicalへの昇格は意図的に自動化していません。
+
+自動テストは合成ZIPで安全性と正規化を検証しています。別途復元したcompanion監査記録には元archiveを379,025,154 bytesとするSHA-256・member数・件数が記載されていますが、実ZIP本体は取得できず、これらの値は現 importer の完走結果として独立検証していません。入力契約とPython APIは [`docs/GBIZ_ARCHIVE_IMPORT_JA.md`](docs/GBIZ_ARCHIVE_IMPORT_JA.md)、7件のlineage・採否・取得制約は [`docs/ZIP_AUDIT_20260824.md`](docs/ZIP_AUDIT_20260824.md) を参照してください。
+
+## 主なDuckDBデータ
+
+代表的なテーブル・ビュー:
 
 ```text
 core.companies                 NTA と gBizINFO の和集合（法人 1 行の統合マスタ）
@@ -365,9 +447,26 @@ G / G37 / G38 / G39 / G40 / G41
 ```powershell
 .\.venv\Scripts\python.exe -m queria_master init-enrichment
 .\.venv\Scripts\python.exe -m queria_master seed-enrichment
+.\.venv\Scripts\python.exe -m queria_master import-website-discovery `
+  --file work\website-search-results.jsonl
+.\.venv\Scripts\python.exe -m queria_master verify-website `
+  1234567890123 https://example.jp/ `
+  --method manual_identity_review --reviewer operator-01 `
+  --evidence "会社概要の法人名・本店所在地がcanonical記録と一致"
+.\.venv\Scripts\python.exe -m queria_master collect-enrichment `
+  --worker-id worker-01 --max-tasks 100
 ```
 
-公式ページをrobots.txtと取得上限に従って段階収集し、問い合わせフォームや明記された電話・メールを取り込む例:
+Web検索adapterは候補URLを作るだけで、候補サイトを取得しません。検証済みURLだけをサイト抽出workerが1回取得し、その1応答から電話・メール・フォームを分岐して保存します。抽出値は初期状態でレビュー対象として扱い、抑止・利用可否を確認した値だけを営業用途へ出します。
+
+```powershell
+.\.venv\Scripts\python.exe -m queria_master review-contact `
+  1234567890123 phone 03-1234-5678 `
+  --decision allowed --reviewer operator-01 `
+  --reason "公式会社概要の代表電話として根拠ページを確認"
+```
+
+判定は `enrichment.contact_reviews` へ追記し、`allowed` の値だけがresolverを通ります。変更後は `publish-runtime` でruntime/indexへ同一generationとして反映します。
 
 ```powershell
 .\.venv\Scripts\python.exe -m queria_master collect-enrichment --worker-id worker-01 --field email --max-tasks 100
@@ -381,11 +480,15 @@ G / G37 / G38 / G39 / G40 / G41
 更新用の正規DBと証拠付き拡張DBを壊さずに保持しつつ、利用時のJOINをなくすため、次のコマンドで一つの読み取り用DuckDBへ物理統合できます。
 
 ```powershell
-.\.venv\Scripts\python.exe -m queria_master build-runtime `
-  --db data\queria_master.duckdb `
+.\.venv\Scripts\python.exe -m queria_master --db data\queria_master.duckdb publish-runtime `
   --enrichment-db data\queria_enrichment.duckdb `
-  --out data\queria_runtime.duckdb
+  --runtime-db data\queria_runtime.duckdb `
+  --search-index data\search.sqlite
+```
 
+状態確認:
+
+```powershell
 .\.venv\Scripts\python.exe -m queria_master runtime-summary `
   --runtime-db data\queria_runtime.duckdb
 ```
@@ -399,7 +502,7 @@ G / G37 / G38 / G39 / G40 / G41
   --keyword SaaS --prefecture 東京都 --fast --limit 100
 ```
 
-更新時は `data/queria_master.duckdb` と `data/queria_enrichment.duckdb` を更新し、最後に `build-runtime` を再実行します。これにより、証拠を残す更新経路と、毎回一つのDBだけを読む高速な利用経路を分離できます。
+更新時は `data/queria_master.duckdb` と `data/queria_enrichment.duckdb` を更新し、最後に `publish-runtime` を再実行します。これにより、runtimeと検索索引を同一generationで公開し、証拠を残す更新経路と毎回一つのDBだけを読む高速な利用経路を分離できます。
 
 出荷前・更新後の監査:
 
@@ -434,42 +537,44 @@ EXEの再ビルド後は `dist\queria-master.exe.json` にサイズ、SHA-256、
 
 ## 安全性と再現性
 
-- Queria 公開 DuckLake を素の DuckDB で直接 `ATTACH` しません。
-- Queria CLI が互換バージョンで read-only 接続し、Parquet へ抽出します。
-- SQL・結果は手元の DuckDB で処理されます。
-- 認証情報を ZIP、SQL、ログ、DB に書き込みません。
-- 既定で Queria の匿名テレメトリを環境変数により無効化します。
-- リモート SQL は `SELECT / WITH` のみです。
-- `scripts/verify_package.py` と標準ライブラリのテストを同梱しています。
+- 公開DuckLakeを素のDuckDBで直接 `ATTACH` せず、Queria CLIのread-only経路で読み取ります。
+- リモートSQLは `SELECT / WITH` の読み取りクエリに限定します。
+- SQL・集計・検索結果は手元のDuckDB / SQLiteで処理します。
+- 既定でQueriaの匿名テレメトリを環境変数により無効化します。
+- APIキー、アクセストークン、Cookieをリポジトリ・ZIP・DB・ログへ保存しません。
+- 入力企業リストや生成DB、取得キャッシュをGitへコミットしません。
+- 特定の入力元に固有のID、URL、APIパス、件数フィンガープリントを公開企業補完コードへ埋め込みません。
+- 公式サイト取得にはSSRF対策、同一ホスト制約、robots.txt、レスポンス上限を適用します。
+- EDINET ZIPには受信サイズ、展開サイズ、ファイル数の上限を適用します。
+- 履歴Hojinjoho ZIPにはpath・member・圧縮比・展開量・JSON構造・正規化recordの上限を適用し、新規stagingだけへ書き込みます。
+- 競合する高確度の法人番号は自動採用せず、候補履歴を残してレビューへ戻します。
 
 検証:
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest -q company_scout/public_enrichment/tests
 .\.venv\Scripts\python.exe scripts\verify_package.py
 ```
 
-Public Company Enrichment:
-
-```bash
-cd company_scout/public_enrichment
-python -m unittest discover -s tests -v
-```
-
-Public Company EnrichmentはGitHub Actionsで Python 3.11 / 3.12 / 3.13 の構文チェックとオフラインテストを実行します。
+GitHub ActionsではPythonテストとmanifest、React build、Rust format/testを独立jobで検証します。
 
 ## ドキュメント
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 全体設計
 - [`docs/V090_OPERATIONAL_ARCHITECTURE_JA.md`](docs/V090_OPERATIONAL_ARCHITECTURE_JA.md) — canonical / runtime / index運用
+- [`docs/GBIZ_ARCHIVE_IMPORT_JA.md`](docs/GBIZ_ARCHIVE_IMPORT_JA.md) — 履歴Hojinjoho ZIPのstaging取込契約
 - [`docs/COMPANYMASTER_INTEGRATION_JA.md`](docs/COMPANYMASTER_INTEGRATION_JA.md) — Windowsアプリ統合
 - [`docs/UI_SEARCH_WORKBENCH_2026-08-21.md`](docs/UI_SEARCH_WORKBENCH_2026-08-21.md) — React/Tauri検索UIと索引フォールバックの契約
 - [`docs/OUTBOUND_ENRICHMENT_RUNBOOK_JA.md`](docs/OUTBOUND_ENRICHMENT_RUNBOOK_JA.md) — 証拠付きenrichment運用
+- [`docs/WEBSITE_DISCOVERY_EXTRACTION_ARCHITECTURE_JA.md`](docs/WEBSITE_DISCOVERY_EXTRACTION_ARCHITECTURE_JA.md) — Web検索発見・公式性検証・サイト抽出の境界
 - [`docs/SEARCH_PERFORMANCE.md`](docs/SEARCH_PERFORMANCE.md) — 検索性能の測定
 - [`docs/GITHUB_DISTRIBUTION_JA.md`](docs/GITHUB_DISTRIBUTION_JA.md) — 大容量配布
 - [`docs/ADR_G_INFORMATION_DATABASE_JA.md`](docs/ADR_G_INFORMATION_DATABASE_JA.md) — 情報通信業版DBの設計判断
 - [`docs/GITHUB_BRANCH_AUDIT_20260824.md`](docs/GITHUB_BRANCH_AUDIT_20260824.md) — GitHubブランチ全量監査
-- [`docs/RELEASE_G_V0100_JA.md`](docs/RELEASE_G_V0100_JA.md) — 情報通信業版 v0.10.0 リリースノート
+- [`docs/RELEASE_G_V0101_JA.md`](docs/RELEASE_G_V0101_JA.md) — 情報通信業版 v0.10.1 リリースノート
+- [`docs/RELEASE_G_V0100_JA.md`](docs/RELEASE_G_V0100_JA.md) — 情報通信業版 v0.10.0（ロールバック用）
 - [`company_scout/public_enrichment/README.md`](company_scout/public_enrichment/README.md) — 公開企業情報補完
 - [`company_scout/public_enrichment/SECURITY.md`](company_scout/public_enrichment/SECURITY.md) — 補完処理のセキュリティ境界
 - [`company_scout/public_enrichment/reference/README.md`](company_scout/public_enrichment/reference/README.md) — 検証済み公式連絡先
