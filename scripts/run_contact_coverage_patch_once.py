@@ -156,3 +156,17 @@ replace_exact(
     "    monkeypatch.setattr(phone, \"is_public_http_url\", lambda _url: True)\n"
     "    monkeypatch.setattr(phone.time, \"sleep\", lambda _seconds: None)\n",
 )
+
+# Runtime snapshots use both `G|39` and compact `G39` notation. Accept only
+# the five in-scope compact middle codes; do not broaden the G37-G41 boundary.
+replace_exact(
+    "scripts/enrich_g_contact_targets.py",
+    "def is_g_industry(industry_code: object) -> bool:\n"
+    "    return any(token.strip() == \"G\" for token in str(industry_code or \"\").split(\"|\"))\n",
+    "def is_g_industry(industry_code: object) -> bool:\n"
+    "    return any(\n"
+    "        token.strip() == \"G\"\n"
+    "        or re.fullmatch(r\"G(?:37|38|39|40|41)\", token.strip()) is not None\n"
+    "        for token in str(industry_code or \"\").split(\"|\")\n"
+    "    )\n",
+)
